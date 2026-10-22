@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <circle cx="24" cy="24" r="22" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
+  <!-- Leaf -->
+  <path d="M16 28 C16 18, 26 14, 32 14 C32 20, 28 30, 18 30 Z" fill="#16a34a"/>
+  <!-- Water drop -->
+  <path d="M28 22 C28 22, 33 28, 33 30.5 C33 33, 30.8 35, 28 35 C25.2 35, 23 33, 23 30.5 C23 28, 28 22, 28 22 Z" fill="#0284c7"/>
+</svg>

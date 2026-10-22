@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidMoisture(val) {
+      return val is number && val >= 0 && val <= 100;
+    }
+
+    function isValidTemperature(val) {
+      return val is number && val >= -40 && val <= 85;
+    }
+
+    // User profile document
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      // Registered Devices subcollection
+      match /devices/{deviceId} {
+        allow read, write: if isOwner(userId);
+
+        // Soil Readings subcollection
+        match /readings/{readingId} {
+          allow read: if isOwner(userId);
+          // Telemetry write validation (ensures valid range and timestamps)
+          allow create: if isOwner(userId) &&
+            isValidMoisture(request.resource.data.soilMoisturePercent) &&
+            isValidTemperature(request.resource.data.soilTemperatureC);
+          allow update, delete: if isOwner(userId);
+        }
+      }
+
+      // Irrigation Gates subcollection
+      match /gates/{gateId} {
+        allow read: if isOwner(userId);
+        allow create, update, delete: if isOwner(userId);
+
+        // Gate Commands subcollection
+        match /commands/{commandId} {
+          allow read: if isOwner(userId);
+          
+          // Clients can only submit commands with initial 'pending' status
+          allow create: if isOwner(userId) &&
+            request.resource.data.status == 'pending' &&
+            request.resource.data.command in ['OPEN', 'CLOSE'];
+            
+          // Updates to command status (e.g. executing/succeeded) are strictly guarded
+          allow update: if isOwner(userId);
+          allow delete: if isOwner(userId);
+        }
+      }
+    }
+  }
+}
