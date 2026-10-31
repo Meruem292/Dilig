@@ -109,20 +109,6 @@ bool validTemperature(const float temperatureC) {
          temperatureC != DEVICE_DISCONNECTED_C;
 }
 
-const char* cloudStateLabel(const CloudResult& result) {
-  switch (result.state) {
-    case CloudState::Sent:
-      return "Cloud: OK";
-    case CloudState::Unregistered:
-      return "Cloud: REGISTER ID";
-    case CloudState::Error:
-      return "Cloud: ERROR";
-    case CloudState::Waiting:
-    default:
-      return "Cloud: waiting";
-  }
-}
-
 void renderDisplay(
     const float temperatureC,
     const float moisturePercent,
@@ -132,33 +118,86 @@ void renderDisplay(
     return;
   }
 
+  const uint8_t frame = static_cast<uint8_t>((millis() / 250UL) % 4UL);
+  const int8_t spinnerX[] = {118, 121, 118, 115};
+  const int8_t spinnerY[] = {3, 6, 9, 6};
+  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  const bool hasMoisture = isfinite(moisturePercent);
+  const uint8_t moisture =
+      hasMoisture ? static_cast<uint8_t>(constrain(moisturePercent, 0.0F, 100.0F)) : 0;
+  const uint8_t fillWidth = static_cast<uint8_t>((116UL * moisture) / 100UL);
+
+  const char* cloudLabel = "SYNC";
+  if (cloudResult.state == CloudState::Sent) {
+    cloudLabel = "LIVE";
+  } else if (cloudResult.state == CloudState::Unregistered) {
+    cloudLabel = "ADD ID";
+  } else if (cloudResult.state == CloudState::Error) {
+    cloudLabel = "RETRY";
+  }
+
+  char temperatureText[10] = "--.-";
+  if (validTemperature(temperatureC)) {
+    snprintf(temperatureText, sizeof(temperatureText), "%.1f", static_cast<double>(temperatureC));
+  }
+  char moistureText[8] = "--%";
+  if (hasMoisture) {
+    snprintf(moistureText, sizeof(moistureText), "%u%%", moisture);
+  }
+
   g_display.clearDisplay();
   g_display.setTextColor(SSD1306_WHITE);
+
+  // Header: project identity, Wi-Fi bars, and a rotating cloud activity dot.
   g_display.setTextSize(1);
   g_display.setCursor(0, 0);
-  g_display.println(F("DILIG SOIL SENSOR"));
-  g_display.println(F("ID DILIG-SEN-"));
-  g_display.println(g_deviceId + strlen("DILIG-SEN-"));
+  g_display.print(F("DILIG  /  SOIL"));
+  for (uint8_t bar = 0; bar < 3; ++bar) {
+    const int16_t height = 2 + bar * 2;
+    const int16_t x = 96 + bar * 4;
+    if (wifiConnected) {
+      g_display.fillRect(x, 9 - height, 2, height, SSD1306_WHITE);
+    } else {
+      g_display.drawRect(x, 9 - height, 2, height, SSD1306_WHITE);
+    }
+  }
+  g_display.drawCircle(118, 6, 4, SSD1306_WHITE);
+  g_display.fillCircle(spinnerX[frame], spinnerY[frame], 1, SSD1306_WHITE);
+  g_display.drawFastHLine(0, 12, config::OLED_WIDTH, SSD1306_WHITE);
 
-  g_display.print(F("Temp: "));
-  if (validTemperature(temperatureC)) {
-    g_display.print(temperatureC, 1);
-    g_display.println(F(" C"));
-  } else {
-    g_display.println(F("sensor error"));
+  // Large live values.
+  g_display.setCursor(1, 15);
+  g_display.setTextSize(1);
+  g_display.print(F("TEMP"));
+  g_display.setTextSize(2);
+  g_display.setCursor(1, 24);
+  g_display.print(temperatureText);
+  g_display.setTextSize(1);
+  g_display.print(F("C"));
+
+  g_display.setTextSize(1);
+  g_display.setCursor(76, 15);
+  g_display.print(F("MOIST"));
+  g_display.setTextSize(2);
+  g_display.setCursor(76, 24);
+  g_display.print(moistureText);
+
+  // Animated fill gauge: a moving highlight makes incoming readings feel live.
+  g_display.drawRoundRect(4, 45, 120, 9, 4, SSD1306_WHITE);
+  if (fillWidth > 0) {
+    g_display.fillRoundRect(6, 47, fillWidth, 5, 2, SSD1306_WHITE);
+    const uint8_t shineX = static_cast<uint8_t>((frame * 29U) % 116U);
+    if (shineX < fillWidth) {
+      g_display.drawFastVLine(6 + shineX, 47, 5, SSD1306_BLACK);
+    }
   }
 
-  g_display.print(F("Moist: "));
-  if (isfinite(moisturePercent)) {
-    g_display.print(moisturePercent, 1);
-    g_display.print(F("% "));
-    g_display.println(soilRaw);
-  } else {
-    g_display.println(F("calibrate"));
-  }
-
-  g_display.print(WiFi.status() == WL_CONNECTED ? F("WiFi OK | ") : F("WiFi -- | "));
-  g_display.println(cloudStateLabel(cloudResult) + strlen("Cloud: "));
+  // Footer retains hardware identity and raw-calibration visibility.
+  g_display.setTextSize(1);
+  g_display.setCursor(0, 56);
+  g_display.printf("RAW:%u", soilRaw);
+  g_display.setCursor(78, 56);
+  g_display.print(cloudLabel);
   g_display.display();
 }
 
