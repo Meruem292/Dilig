@@ -24,7 +24,7 @@ export interface UserProfile {
 export interface SoilReading {
   id?: string;
   deviceId: string;
-  soilTemperatureC: number;
+  soilTemperatureC: number | null;
   soilMoisturePercent: number;
   recordedAt: number; // epoch ms for consistent serialization
 }
@@ -40,6 +40,7 @@ export interface Device {
   updatedAt: number;
   assignedGateId?: string | null;
   latestReading?: SoilReading | null;
+  registryVersion?: number;
 }
 
 export interface Gate {

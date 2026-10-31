@@ -31,25 +31,16 @@ npm run sim:actuator YOUR_USER_ID ACT-001
 
 ---
 
-## 2. Microcontroller Hardware Protocol (ESP32 / ESP8266 / Arduino)
+## 2. Microcontroller Hardware Protocol (ESP32)
 
-Dilig devices communicate via either:
-1. **HTTP REST Webhooks** (via Firebase Cloud Functions in `functions/` or custom server)
-2. **Direct Firestore Modular SDK / REST API**
+The physical sensor uses the Firestore REST API directly, which works on the Firebase Spark plan. It first reads `deviceRegistry/{deviceId}`, then atomically commits `readings/latest` and the device heartbeat to the resolved user's device document. Firestore rules limit unauthenticated hardware writes to those telemetry fields.
 
-### Sensor Telemetry Payload (HTTP POST)
-Endpoint: `https://YOUR_REGION-YOUR_PROJECT.cloudfunctions.net/recordTelemetry`
+The physical sensor does not store a Firebase user ID. The user registers the OLED-displayed device ID in the DILIG web app, which creates the global registry binding.
 
-```json
-{
-  "userId": "YOUR_FIREBASE_UID",
-  "deviceId": "SEN-001",
-  "soilTemperatureC": 25.8,
-  "soilMoisturePercent": 52.4
-}
-```
+### Optional legacy actuator webhook protocol
 
-### Actuator Poll & Execution Protocol
+The following Cloud Function protocol remains as reference code and requires a Blaze-plan deployment. The current Node actuator simulator talks directly to Firestore and does not require these endpoints.
+
 1. Actuator checks for pending command:
    `GET https://YOUR_REGION-YOUR_PROJECT.cloudfunctions.net/getPendingCommand?userId=...&deviceId=ACT-001`
    Response:
@@ -75,56 +66,14 @@ Endpoint: `https://YOUR_REGION-YOUR_PROJECT.cloudfunctions.net/recordTelemetry`
 
 ---
 
-## 3. Sample ESP32 Arduino C++ Code (Soil Sensor)
+## 3. ESP32 Sensor Firmware
 
-```cpp
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
+The deployable PlatformIO firmware is in `firmware/sensor-node/`. It supports
+the DS18B20, capacitive soil-moisture probe, SSD1306 OLED, dual-core FreeRTOS
+task separation, watchdog recovery, calibration, and dynamic account routing.
 
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-const char* webhookUrl = "https://YOUR_PROJECT.cloudfunctions.net/recordTelemetry";
+## 4. ESP32 Gate Actuator Firmware
 
-const char* userId = "YOUR_FIREBASE_UID";
-const char* deviceId = "SEN-001";
-const int moisturePin = 34; // Analog pin for capacitive soil sensor
-
-void setup() {
-  Serial.begin(115200);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi Connected");
-}
-
-void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    int rawValue = analogRead(moisturePin);
-    // Calibration map: raw analog to 0 - 100% moisture
-    float moisturePercent = map(rawValue, 3200, 1400, 0, 100);
-    moisturePercent = constrain(moisturePercent, 0.0, 100.0);
-    float tempC = 25.5; // From DS18B20 or thermistor
-
-    HTTPClient http;
-    http.begin(webhookUrl);
-    http.addHeader("Content-Type", "application/json");
-
-    StaticJsonDocument<200> doc;
-    doc["userId"] = userId;
-    doc["deviceId"] = deviceId;
-    doc["soilTemperatureC"] = tempC;
-    doc["soilMoisturePercent"] = moisturePercent;
-
-    String requestBody;
-    serializeJson(doc, requestBody);
-
-    int httpCode = http.POST(requestBody);
-    Serial.printf("Telemetry POST Result: %d\n", httpCode);
-    http.end();
-  }
-  delay(30000); // Send every 30 seconds
-}
-```
+The deployable two-relay, dual-limit-switch, SSD1306 controller is in
+`firmware/actuator-node/`. It uses direct Firestore REST communication on the
+Spark plan and atomically confirms command completion with the physical gate state.

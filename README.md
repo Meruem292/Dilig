@@ -29,7 +29,10 @@ Built with **React**, **TypeScript**, **Tailwind CSS**, and **Firebase (Authenti
   - Strict validation of temperature (-40°C to 85°C) and moisture (0% to 100%).
 - **Hardware Integration & Simulator**:
   - Includes virtual ESP32 sensor and actuator simulators in `hardware-simulator/`.
-  - Includes Firebase Cloud Functions in `functions/` for device webhooks.
+  - Includes deployable DS18B20 + capacitive moisture + OLED firmware in `firmware/sensor-node/`.
+  - Includes fail-safe two-relay + dual-limit-switch + OLED gate firmware in `firmware/actuator-node/`.
+  - Physical sensors use direct Firestore REST telemetry and work on the Firebase Spark plan.
+  - Includes optional Cloud Function webhook reference code in `functions/` (Blaze plan only; not part of the default deployment).
 
 ---
 
@@ -112,8 +115,11 @@ DILIG/
 ├── README.md                  # Project documentation
 ├── firestore.rules            # Firestore security rules
 ├── firestore.indexes.json     # Firestore composite indexes
-├── functions/                 # Trusted Cloud Functions backend for devices
+├── functions/                 # Optional Blaze-plan webhook reference
 │   └── src/index.ts           # Telemetry & actuator webhook endpoints
+├── firmware/
+│   ├── sensor-node/           # PlatformIO ESP32 soil sensor firmware
+│   └── actuator-node/         # PlatformIO ESP32 gate actuator firmware
 ├── hardware-simulator/        # Node.js virtual hardware runners
 │   ├── simulate-sensor.js     # Live soil moisture/temp stream
 │   ├── simulate-actuator.js   # Live gate motor execution simulator

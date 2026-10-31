@@ -94,11 +94,11 @@ export const DeviceFormModal: React.FC<DeviceFormModalProps> = ({
             required
             value={deviceId}
             onChange={(e) => setDeviceId(e.target.value)}
-            placeholder="e.g. ESP32-SN01 or ACT-GATE-01"
+            placeholder="e.g. DILIG-SEN-A1B2C3D4E5F6"
             className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-nature-500 text-sm font-mono text-charcoal uppercase"
           />
           <p className="text-[11px] text-charcoal-muted mt-1">
-            This identifier is configured on your microcontroller firmware or equipment label.
+            For the DILIG sensor node, copy the ID shown on its OLED or Serial Monitor.
           </p>
         </div>
 

@@ -19,44 +19,253 @@ service cloud.firestore {
       return val is number && val >= -40 && val <= 85;
     }
 
+    function registryMatchesSensor(userId, deviceDocId, hardwareId) {
+      let registry = get(/databases/$(database)/documents/deviceRegistry/$(hardwareId));
+      return registry.data.userId == userId &&
+        registry.data.deviceDocId == deviceDocId &&
+        registry.data.deviceId == hardwareId &&
+        registry.data.type == 'sensor';
+    }
+
+    function registryMatchesActuator(userId, deviceDocId, hardwareId) {
+      let registry = get(/databases/$(database)/documents/deviceRegistry/$(hardwareId));
+      return registry.data.userId == userId &&
+        registry.data.deviceDocId == deviceDocId &&
+        registry.data.deviceId == hardwareId &&
+        registry.data.type == 'actuator';
+    }
+
+    function registryMatchesActuatorUser(userId, hardwareId) {
+      let registry = get(/databases/$(database)/documents/deviceRegistry/$(hardwareId));
+      return registry.data.userId == userId &&
+        registry.data.deviceId == hardwareId &&
+        registry.data.type == 'actuator';
+    }
+
+    function isValidTelemetryReading(data, hardwareId) {
+      return data.keys().hasOnly([
+          'deviceId',
+          'soilTemperatureC',
+          'soilMoisturePercent',
+          'recordedAt'
+        ]) &&
+        data.deviceId == hardwareId &&
+        // A failed DS18B20 must not prevent a valid moisture probe from
+        // reporting. Firmware represents the unavailable probe as null.
+        (data.soilTemperatureC == null || isValidTemperature(data.soilTemperatureC)) &&
+        isValidMoisture(data.soilMoisturePercent) &&
+        data.recordedAt is number;
+    }
+
+    function isRegisteredSensorDeviceUpdate(userId, deviceDocId) {
+      return request.auth == null &&
+        resource.data.type == 'sensor' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'lastSeenAt',
+          'latestReading',
+          'updatedAt'
+        ]) &&
+        request.resource.data.status == 'online' &&
+        request.resource.data.lastSeenAt is number &&
+        request.resource.data.updatedAt == request.resource.data.lastSeenAt &&
+        request.resource.data.latestReading is map &&
+        isValidTelemetryReading(request.resource.data.latestReading, resource.data.deviceId) &&
+        request.resource.data.latestReading.recordedAt == request.resource.data.lastSeenAt &&
+        registryMatchesSensor(userId, deviceDocId, resource.data.deviceId);
+    }
+
+    function isRegisteredSensorReadingWrite(userId, deviceDocId, readingId) {
+      let device = get(/databases/$(database)/documents/users/$(userId)/devices/$(deviceDocId));
+      return request.auth == null &&
+        readingId == 'latest' &&
+        device.data.type == 'sensor' &&
+        isValidTelemetryReading(request.resource.data, device.data.deviceId) &&
+        registryMatchesSensor(userId, deviceDocId, device.data.deviceId);
+    }
+
+    function isRegisteredActuatorDeviceRead(userId, deviceDocId) {
+      return request.auth == null &&
+        resource.data.type == 'actuator' &&
+        registryMatchesActuator(userId, deviceDocId, resource.data.deviceId);
+    }
+
+    function isRegisteredActuatorHeartbeat(userId, deviceDocId) {
+      return request.auth == null &&
+        resource.data.type == 'actuator' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'lastSeenAt',
+          'updatedAt'
+        ]) &&
+        request.resource.data.status == 'online' &&
+        request.resource.data.lastSeenAt is number &&
+        request.resource.data.updatedAt == request.resource.data.lastSeenAt &&
+        registryMatchesActuator(userId, deviceDocId, resource.data.deviceId);
+    }
+
+    function isRegisteredActuatorGateRead(userId) {
+      return request.auth == null &&
+        resource.data.actuatorDeviceId is string &&
+        registryMatchesActuatorUser(userId, resource.data.actuatorDeviceId);
+    }
+
+    function isRegisteredActuatorPositionUpdate(userId) {
+      return request.auth == null &&
+        resource.data.actuatorDeviceId is string &&
+        resource.data.pendingCommandId == null &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'reportedState',
+          'updatedAt'
+        ]) &&
+        request.resource.data.reportedState in ['open', 'closed', 'error'] &&
+        request.resource.data.updatedAt is number &&
+        registryMatchesActuatorUser(userId, resource.data.actuatorDeviceId);
+    }
+
+    function isRegisteredActuatorCompletion(userId, gateId) {
+      let command = getAfter(/databases/$(database)/documents/users/$(userId)/gates/$(gateId)/commands/$(resource.data.pendingCommandId));
+      return request.auth == null &&
+        resource.data.actuatorDeviceId is string &&
+        resource.data.pendingCommandId is string &&
+        resource.data.reportedState == 'moving' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'reportedState',
+          'pendingCommandId',
+          'updatedAt'
+        ]) &&
+        request.resource.data.pendingCommandId == null &&
+        request.resource.data.updatedAt is number &&
+        command.data.gateId == gateId &&
+        command.data.actuatorDeviceId == resource.data.actuatorDeviceId &&
+        command.data.completedAt == request.resource.data.updatedAt &&
+        ((command.data.status == 'succeeded' &&
+          ((command.data.command == 'OPEN' && request.resource.data.reportedState == 'open') ||
+           (command.data.command == 'CLOSE' && request.resource.data.reportedState == 'closed'))) ||
+         (command.data.status == 'failed' && request.resource.data.reportedState == 'error')) &&
+        registryMatchesActuatorUser(userId, resource.data.actuatorDeviceId);
+    }
+
+    function isRegisteredActuatorCommandRead(userId, gateId) {
+      let gate = get(/databases/$(database)/documents/users/$(userId)/gates/$(gateId));
+      return request.auth == null &&
+        gate.data.actuatorDeviceId == resource.data.actuatorDeviceId &&
+        registryMatchesActuatorUser(userId, resource.data.actuatorDeviceId);
+    }
+
+    function isValidActuatorCommandTransition(userId, gateId, commandId) {
+      let gate = get(/databases/$(database)/documents/users/$(userId)/gates/$(gateId));
+      let gateAfter = getAfter(/databases/$(database)/documents/users/$(userId)/gates/$(gateId));
+      return request.auth == null &&
+        gate.data.actuatorDeviceId == resource.data.actuatorDeviceId &&
+        resource.data.gateId == gateId &&
+        gate.data.pendingCommandId == commandId &&
+        gate.data.reportedState == 'moving' &&
+        registryMatchesActuatorUser(userId, resource.data.actuatorDeviceId) &&
+        ((resource.data.status == 'pending' &&
+          request.resource.data.status == 'executing' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])) ||
+         (resource.data.status == 'executing' &&
+          request.resource.data.status in ['succeeded', 'failed'] &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status',
+            'completedAt',
+            'errorMessage'
+          ]) &&
+          request.resource.data.completedAt is number &&
+          gateAfter.data.pendingCommandId == null &&
+          gateAfter.data.updatedAt == request.resource.data.completedAt &&
+          ((request.resource.data.status == 'succeeded' &&
+            ((resource.data.command == 'OPEN' && gateAfter.data.reportedState == 'open') ||
+             (resource.data.command == 'CLOSE' && gateAfter.data.reportedState == 'closed'))) ||
+           (request.resource.data.status == 'failed' && gateAfter.data.reportedState == 'error'))));
+    }
+
+    function isValidOwnerCommandCreate(userId, gateId, commandId) {
+      let gateAfter = getAfter(/databases/$(database)/documents/users/$(userId)/gates/$(gateId));
+      return isOwner(userId) &&
+        request.resource.data.keys().hasOnly([
+          'gateId',
+          'actuatorDeviceId',
+          'command',
+          'status',
+          'requestedAt',
+          'completedAt',
+          'errorMessage'
+        ]) &&
+        request.resource.data.gateId == gateId &&
+        request.resource.data.actuatorDeviceId == gateAfter.data.actuatorDeviceId &&
+        request.resource.data.command in ['OPEN', 'CLOSE'] &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.requestedAt is number &&
+        request.resource.data.completedAt == null &&
+        request.resource.data.errorMessage == null &&
+        gateAfter.data.pendingCommandId == commandId &&
+        gateAfter.data.reportedState == 'moving';
+    }
+
     // User profile document
     match /users/{userId} {
       allow read, write: if isOwner(userId);
 
       // Registered Devices subcollection
-      match /devices/{deviceId} {
-        allow read, write: if isOwner(userId);
+      match /devices/{deviceDocId} {
+        allow get: if isOwner(userId) || isRegisteredActuatorDeviceRead(userId, deviceDocId);
+        allow list: if isOwner(userId);
+        allow create, delete: if isOwner(userId);
+        allow update: if isOwner(userId) ||
+          isRegisteredSensorDeviceUpdate(userId, deviceDocId) ||
+          isRegisteredActuatorHeartbeat(userId, deviceDocId);
 
         // Soil Readings subcollection
         match /readings/{readingId} {
           allow read: if isOwner(userId);
-          // Telemetry write validation (ensures valid range and timestamps)
-          allow create: if isOwner(userId) &&
-            isValidMoisture(request.resource.data.soilMoisturePercent) &&
-            isValidTemperature(request.resource.data.soilTemperatureC);
-          allow update, delete: if isOwner(userId);
+          allow create, update: if isOwner(userId) ||
+            isRegisteredSensorReadingWrite(userId, deviceDocId, readingId);
+          allow delete: if isOwner(userId);
         }
       }
 
       // Irrigation Gates subcollection
       match /gates/{gateId} {
-        allow read: if isOwner(userId);
-        allow create, update, delete: if isOwner(userId);
+        allow get: if isOwner(userId) || isRegisteredActuatorGateRead(userId);
+        allow list: if isOwner(userId);
+        allow create, delete: if isOwner(userId);
+        allow update: if isOwner(userId) ||
+          isRegisteredActuatorPositionUpdate(userId) ||
+          isRegisteredActuatorCompletion(userId, gateId);
 
         // Gate Commands subcollection
         match /commands/{commandId} {
-          allow read: if isOwner(userId);
-          
-          // Clients can only submit commands with initial 'pending' status
-          allow create: if isOwner(userId) &&
-            request.resource.data.status == 'pending' &&
-            request.resource.data.command in ['OPEN', 'CLOSE'];
-            
-          // Updates to command status (e.g. executing/succeeded) are strictly guarded
-          allow update: if isOwner(userId);
+          allow get: if isOwner(userId) || isRegisteredActuatorCommandRead(userId, gateId);
+          allow list: if isOwner(userId);
+          allow create: if isValidOwnerCommandCreate(userId, gateId, commandId);
+          allow update: if isOwner(userId) ||
+            isValidActuatorCommandTransition(userId, gateId, commandId);
           allow delete: if isOwner(userId);
         }
       }
+    }
+
+    // Globally unique hardware IDs route telemetry to the account that registered
+    // the device. A registry entry must be created atomically with its user device.
+    match /deviceRegistry/{deviceId} {
+      // Exact document lookup is public so an unauthenticated ESP32 can resolve
+      // its owner dynamically. Collection listing remains forbidden.
+      allow get: if true;
+      allow list: if false;
+
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.deviceId == deviceId &&
+        request.resource.data.type in ['sensor', 'actuator'] &&
+        request.resource.data.createdAt is number &&
+        existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)/devices/$(request.resource.data.deviceDocId)) &&
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)/devices/$(request.resource.data.deviceDocId)).data.deviceId == deviceId &&
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)/devices/$(request.resource.data.deviceDocId)).data.type == request.resource.data.type;
+
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow update: if false;
     }
   }
 }

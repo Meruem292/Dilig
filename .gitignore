@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Per-device ESP32 Wi-Fi and endpoint configuration
+firmware/**/include/secrets.h
+.pio
+functions/lib
+.firebase
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

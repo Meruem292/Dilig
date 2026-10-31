@@ -1,15 +1,14 @@
 import {
   collection,
   doc,
-  addDoc,
-  updateDoc,
   onSnapshot,
+  runTransaction,
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import type { Gate, Device, CommandAction } from '../types';
 import { isDeviceOnline } from './deviceService';
 
-const COMMAND_TIMEOUT_MS = 35 * 1000; // 35 seconds timeout
+const COMMAND_TIMEOUT_MS = 75 * 1000; // 60s motor cutoff + network/reporting margin
 
 export const sendGateCommand = async (
   userId: string,
@@ -37,51 +36,79 @@ export const sendGateCommand = async (
 
   const now = Date.now();
 
-  // 1. Create Command in Firestore subcollection
+  // Atomically reserve the gate and create its command so duplicate clients
+  // cannot leave a command without a matching moving/pending gate state.
   const commandsRef = collection(db, 'users', userId, 'gates', gate.id, 'commands');
-  const commandDoc = await addDoc(commandsRef, {
-    gateId: gate.id,
-    actuatorDeviceId: gate.actuatorDeviceId,
-    command: action,
-    status: 'pending',
-    requestedAt: now,
-    completedAt: null,
-    errorMessage: null,
-  });
-
+  const commandDoc = doc(commandsRef);
   const commandId = commandDoc.id;
-
-  // 2. Update Gate to "moving" with pendingCommandId
   const gateRef = doc(db, 'users', userId, 'gates', gate.id);
-  await updateDoc(gateRef, {
-    reportedState: 'moving',
-    pendingCommandId: commandId,
-    updatedAt: now,
+
+  await runTransaction(db, async (transaction) => {
+    const gateSnapshot = await transaction.get(gateRef);
+    if (!gateSnapshot.exists()) {
+      throw new Error('The selected gate no longer exists.');
+    }
+
+    const currentGate = gateSnapshot.data();
+    if (currentGate.reportedState === 'moving' || currentGate.pendingCommandId) {
+      throw new Error('A gate movement is already in progress. Please wait for it to complete.');
+    }
+    if (currentGate.actuatorDeviceId !== gate.actuatorDeviceId) {
+      throw new Error('The gate actuator assignment changed. Refresh and try again.');
+    }
+
+    transaction.set(commandDoc, {
+      gateId: gate.id,
+      actuatorDeviceId: gate.actuatorDeviceId,
+      command: action,
+      status: 'pending',
+      requestedAt: now,
+      completedAt: null,
+      errorMessage: null,
+    });
+    transaction.update(gateRef, {
+      reportedState: 'moving',
+      pendingCommandId: commandId,
+      updatedAt: now,
+    });
   });
 
-  // 3. Start client-side timeout watcher to prevent infinite pending if actuator is unreachable
+  // Spark-plan fallback: expire the command while a user client remains open.
+  // The actuator independently enforces its 60-second motor cutoff.
   const timeoutTimer = setTimeout(async () => {
     try {
       if (!db) return;
-      const cmdRef = doc(db, 'users', userId, 'gates', gate.id, 'commands', commandId);
-      await updateDoc(cmdRef, {
-        status: 'expired',
-        errorMessage: 'Command timed out: Actuator did not confirm completion within 35 seconds.',
-        completedAt: Date.now(),
-      });
+      await runTransaction(db, async (transaction) => {
+        const [commandSnapshot, gateSnapshot] = await Promise.all([
+          transaction.get(commandDoc),
+          transaction.get(gateRef),
+        ]);
+        if (!commandSnapshot.exists() || !gateSnapshot.exists()) return;
 
-      // Reset gate state to error/unknown
-      await updateDoc(gateRef, {
-        reportedState: 'error',
-        pendingCommandId: null,
-        updatedAt: Date.now(),
+        const status = commandSnapshot.data().status;
+        if (status !== 'pending' && status !== 'executing') return;
+
+        const completedAt = Date.now();
+        transaction.update(commandDoc, {
+          status: 'expired',
+          errorMessage: 'Command timed out: Actuator did not confirm completion within 75 seconds.',
+          completedAt,
+        });
+
+        if (gateSnapshot.data().pendingCommandId === commandId) {
+          transaction.update(gateRef, {
+            reportedState: 'error',
+            pendingCommandId: null,
+            updatedAt: completedAt,
+          });
+        }
       });
     } catch (err) {
       console.warn('Timeout handler error:', err);
     }
   }, COMMAND_TIMEOUT_MS);
 
-  // 4. Listen for completion or failure to clear the timeout
+  // Listen for completion or failure to clear the timeout.
   const unsubscribe = onSnapshot(commandDoc, (snap) => {
     if (!snap.exists()) return;
     const data = snap.data();

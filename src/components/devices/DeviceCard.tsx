@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Card } from '../common/Card';
+import { Button } from '../common/Button';
 import { Badge } from '../common/Badge';
 import { DeviceTypeBadge } from './DeviceTypeBadge';
+import { GateStatusBadge } from '../gates/GateStatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import {
   Cpu,
@@ -12,16 +14,20 @@ import {
   Thermometer,
   Droplet,
   Check,
+  ArrowUpRight,
+  ArrowDownLeft,
+  AlertTriangle,
 } from 'lucide-react';
-import type { Device, Gate } from '../../types';
+import type { CommandAction, Device, Gate } from '../../types';
 import { isDeviceOnline } from '../../services/deviceService';
-import { formatTimeAgo } from '../../services/telemetryService';
+import { formatTimeAgo, isReadingStale } from '../../services/telemetryService';
 
 export interface DeviceCardProps {
   device: Device;
   assignedGate?: Gate | null;
   onUpdateName: (device: Device, newName: string) => Promise<void>;
   onDelete: (device: Device) => Promise<void>;
+  onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
 }
 
 export const DeviceCard: React.FC<DeviceCardProps> = ({
@@ -29,14 +35,22 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
   assignedGate,
   onUpdateName,
   onDelete,
+  onSendCommand,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editedName, setEditedName] = useState(device.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isSavingName, setIsSavingName] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<CommandAction | null>(null);
+  const [isSendingCommand, setIsSendingCommand] = useState(false);
 
   const online = isDeviceOnline(device);
+  const reading = device.type === 'sensor' ? device.latestReading : null;
+  const readingStale = reading ? isReadingStale(reading.recordedAt) : true;
+  const isMoving = assignedGate?.reportedState === 'moving';
+  const isOpen = assignedGate?.reportedState === 'open';
+  const isClosed = assignedGate?.reportedState === 'closed';
 
   const handleSaveName = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -60,6 +74,17 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
       setShowDeleteConfirm(false);
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const handleCommandConfirm = async () => {
+    if (!assignedGate || !confirmAction) return;
+    setIsSendingCommand(true);
+    try {
+      await onSendCommand(assignedGate, confirmAction);
+      setConfirmAction(null);
+    } finally {
+      setIsSendingCommand(false);
     }
   };
 
@@ -143,24 +168,93 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
             )}
           </div>
 
-          {/* Latest Sensor Reading if available */}
-          {device.type === 'sensor' && device.latestReading && (
-            <div className="p-2.5 rounded-xl bg-nature-50/60 border border-nature-100 text-nature-950 flex items-center justify-around">
-              <div className="flex items-center gap-1.5">
-                <Droplet className="w-4 h-4 text-water-600" />
-                <span className="font-bold">{device.latestReading.soilMoisturePercent}%</span>
-                <span className="text-slate-500 text-[11px]">Moisture</span>
+          {device.type === 'sensor' && (
+            reading ? (
+              <div className="p-2.5 rounded-xl bg-nature-50/60 border border-nature-100 text-nature-950">
+                <div className="flex items-center justify-around">
+                  <div className="flex items-center gap-1.5">
+                    <Droplet className="w-4 h-4 text-water-600" />
+                    <span className="font-bold">
+                      {Math.round(reading.soilMoisturePercent * 10) / 10}%
+                    </span>
+                    <span className="text-slate-500 text-[11px]">Moisture</span>
+                  </div>
+                  <div className="h-4 w-px bg-slate-200" />
+                  <div className="flex items-center gap-1.5">
+                    <Thermometer className="w-4 h-4 text-nature-700" />
+                    <span className="font-bold">
+                      {typeof reading.soilTemperatureC === 'number'
+                        ? `${Math.round(reading.soilTemperatureC * 10) / 10}°C`
+                        : '--'}
+                    </span>
+                    <span className="text-slate-500 text-[11px]">Temp</span>
+                  </div>
+                </div>
+                <div className="mt-2 pt-2 border-t border-nature-100 flex items-center justify-between text-[11px]">
+                  <span className={readingStale ? 'text-amber-700 font-semibold' : 'text-nature-700 font-semibold'}>
+                    {readingStale ? 'Outdated reading' : 'Live reading'}
+                  </span>
+                  <span className="text-slate-500">{formatTimeAgo(reading.recordedAt)}</span>
+                </div>
               </div>
-              <div className="h-4 w-px bg-slate-200" />
-              <div className="flex items-center gap-1.5">
-                <Thermometer className="w-4 h-4 text-nature-700" />
-                <span className="font-bold">{device.latestReading.soilTemperatureC}°C</span>
-                <span className="text-slate-500 text-[11px]">Temp</span>
+            ) : (
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-dashed border-slate-300 text-slate-500 text-center">
+                Waiting for the first sensor reading
               </div>
+            )
+          )}
+
+          {device.type === 'actuator' && assignedGate && (
+            <div className="p-2.5 rounded-xl bg-water-50/60 border border-water-100 flex items-center justify-between gap-2">
+              <span className="text-water-900 font-semibold">Physical gate state</span>
+              <GateStatusBadge state={assignedGate.reportedState} size="sm" />
             </div>
           )}
         </div>
       </div>
+
+      {device.type === 'actuator' && (
+        <div className="pt-3 border-t border-slate-100 mt-2">
+          {!assignedGate ? (
+            <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+              <span>Assign this actuator to a gate before sending commands.</span>
+            </div>
+          ) : !online ? (
+            <div className="p-2.5 rounded-xl bg-slate-100 border border-slate-200 text-slate-700 text-xs flex items-center gap-2 mb-2.5">
+              <AlertTriangle className="w-4 h-4 text-slate-500 flex-shrink-0" />
+              <span>The actuator is offline. Controls are disabled.</span>
+            </div>
+          ) : null}
+
+          {assignedGate && (
+            <div className="grid grid-cols-2 gap-2.5 mt-2.5">
+              <Button
+                type="button"
+                variant="primary"
+                size="md"
+                leftIcon={<ArrowUpRight className="w-4 h-4" />}
+                onClick={() => setConfirmAction('OPEN')}
+                disabled={!online || isMoving || isOpen}
+                className="w-full"
+              >
+                {isOpen ? 'Already Open' : 'Open Gate'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="md"
+                leftIcon={<ArrowDownLeft className="w-4 h-4" />}
+                onClick={() => setConfirmAction('CLOSE')}
+                disabled={!online || isMoving || isClosed}
+                className="w-full"
+              >
+                {isClosed ? 'Already Closed' : 'Close Gate'}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Footer Actions */}
       <div className="flex items-center justify-end gap-2 pt-2.5 border-t border-slate-100 mt-2">
@@ -194,6 +288,17 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
         confirmLabel="Yes, Remove Device"
         variant="danger"
         isLoading={isDeleting}
+      />
+
+      <ConfirmDialog
+        isOpen={confirmAction !== null}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={handleCommandConfirm}
+        title={confirmAction === 'OPEN' ? 'Open Irrigation Gate?' : 'Close Irrigation Gate?'}
+        message={`Are you sure you want to ${confirmAction || ''} "${assignedGate?.name || 'this gate'}"? The physical actuator will move until its limit switch is reached.`}
+        confirmLabel={confirmAction === 'OPEN' ? 'Yes, Open Gate' : 'Yes, Close Gate'}
+        variant={confirmAction === 'OPEN' ? 'primary' : 'secondary'}
+        isLoading={isSendingCommand}
       />
     </Card>
   );

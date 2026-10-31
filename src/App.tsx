@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ToastProvider, useToast } from './context/ToastContext';
 import { Layout } from './components/layout/Layout';
@@ -13,11 +13,16 @@ import { ProfileModal } from './components/settings/ProfileModal';
 import { SoilThresholdModal } from './components/settings/SoilThresholdModal';
 import { LoadingSpinner } from './components/common/LoadingSpinner';
 
-import type { Gate, Device, SoilReading, CommandAction, DeviceType } from './types';
-import { subscribeToUserDevices, addDevice, updateDeviceName, deleteDevice } from './services/deviceService';
+import type { Gate, Device, CommandAction, DeviceType } from './types';
+import {
+  subscribeToUserDevices,
+  addDevice,
+  updateDeviceName,
+  deleteDevice,
+  ensureDeviceRegistry,
+} from './services/deviceService';
 import { subscribeToUserGates, createGate, updateGate, deleteGate } from './services/gateService';
 import { sendGateCommand } from './services/commandService';
-import { subscribeToDeviceReadings } from './services/telemetryService';
 
 const MainApp: React.FC = () => {
   const { currentUser, userProfile, loading: authLoading } = useAuth();
@@ -28,8 +33,7 @@ const MainApp: React.FC = () => {
   const [devices, setDevices] = useState<Device[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
 
-  // Latest Soil Telemetry
-  const [latestReading, setLatestReading] = useState<SoilReading | null>(null);
+  const registryRepairs = useRef(new Set<string>());
 
   // Modals state
   const [isAddGateOpen, setIsAddGateOpen] = useState(false);
@@ -43,7 +47,6 @@ const MainApp: React.FC = () => {
     if (!currentUser) {
       setGates([]);
       setDevices([]);
-      setLatestReading(null);
       setDataLoading(false);
       return;
     }
@@ -85,25 +88,30 @@ const MainApp: React.FC = () => {
     return devices.find((d) => d.type === 'sensor') || null;
   }, [devices]);
 
-  // Subscribe to real-time readings from primary soil sensor
+  // The firmware updates latestReading atomically with the device heartbeat,
+  // so this uses the same real-time snapshot that powers every device card.
+  const latestReading = primarySensorDevice?.latestReading ?? null;
+
+  // Devices created before deviceRegistry was introduced cannot route their
+  // telemetry. Repair those records once, without claiming an ID owned by a
+  // different account.
   useEffect(() => {
-    if (!currentUser || !primarySensorDevice) {
-      setLatestReading(null);
-      return;
+    if (!currentUser) return;
+
+    for (const device of devices) {
+      const repairKey = `${currentUser.uid}/${device.id}`;
+      if (registryRepairs.current.has(repairKey)) continue;
+
+      registryRepairs.current.add(repairKey);
+      void ensureDeviceRegistry(currentUser.uid, device).catch((error: unknown) => {
+        registryRepairs.current.delete(repairKey);
+        showError(
+          'Device routing repair failed',
+          (error as Error).message || 'Could not connect this device to live telemetry.'
+        );
+      });
     }
-
-    const unsubReadings = subscribeToDeviceReadings(
-      currentUser.uid,
-      primarySensorDevice.id,
-      (reading) => {
-        setLatestReading(reading);
-      }
-    );
-
-    return () => {
-      unsubReadings();
-    };
-  }, [currentUser, primarySensorDevice]);
+  }, [currentUser, devices, showError]);
 
   // Command execution handler
   const handleSendCommand = async (gate: Gate, action: CommandAction) => {
@@ -182,7 +190,7 @@ const MainApp: React.FC = () => {
   const handleDeleteDevice = async (device: Device) => {
     if (!currentUser) return;
     try {
-      await deleteDevice(currentUser.uid, device.id, device.assignedGateId);
+      await deleteDevice(currentUser.uid, device);
       showSuccess('Device removed', `"${device.name}" removed from your account.`);
     } catch (err: unknown) {
       showError('Remove failed', (err as Error).message || 'Could not remove device.');
@@ -259,6 +267,7 @@ const MainApp: React.FC = () => {
               onAddDevice={() => setIsAddDeviceOpen(true)}
               onUpdateDeviceName={handleUpdateDeviceName}
               onDeleteDevice={handleDeleteDevice}
+              onSendCommand={handleSendCommand}
             />
           )}
         </>

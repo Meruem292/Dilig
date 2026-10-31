@@ -1,19 +1,23 @@
 import * as functions from 'firebase-functions';
-import * as admin from 'firebase-admin';
+import { initializeApp } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
 
-admin.initializeApp();
-const db = admin.firestore();
+initializeApp();
+const db = getFirestore();
+
+const normalizeDeviceId = (value: unknown): string =>
+  typeof value === 'string' ? value.trim().toUpperCase() : '';
 
 /**
  * 1. Telemetry Webhook Endpoint for Physical Soil Sensors
  * ESP32 / Arduino devices POST JSON:
  * {
- *   "userId": "FIREBASE_USER_ID",
- *   "deviceId": "SEN-001",
- *   "apiKey": "OPTIONAL_DEVICE_SECRET",
+ *   "deviceId": "DILIG-SEN-A1B2C3D4E5F6",
  *   "soilTemperatureC": 26.4,
  *   "soilMoisturePercent": 48.2
  * }
+ * The device ID is resolved through /deviceRegistry; firmware does not store a
+ * Firebase user ID. Device authentication is intentionally not enabled.
  */
 export const recordTelemetry = functions.https.onRequest(async (req, res) => {
   if (req.method !== 'POST') {
@@ -21,10 +25,11 @@ export const recordTelemetry = functions.https.onRequest(async (req, res) => {
     return;
   }
 
-  const { userId, deviceId, soilTemperatureC, soilMoisturePercent } = req.body;
+  const { soilTemperatureC, soilMoisturePercent } = req.body;
+  const deviceId = normalizeDeviceId(req.body.deviceId);
 
-  if (!userId || !deviceId) {
-    res.status(400).json({ error: 'Missing userId or deviceId.' });
+  if (!deviceId) {
+    res.status(400).json({ error: 'Missing deviceId.' });
     return;
   }
 
@@ -39,16 +44,26 @@ export const recordTelemetry = functions.https.onRequest(async (req, res) => {
   }
 
   try {
-    // 1. Locate registered device in user's devices subcollection
-    const devicesRef = db.collection('users').doc(userId).collection('devices');
-    const devQuery = await devicesRef.where('deviceId', '==', deviceId).limit(1).get();
-
-    if (devQuery.empty) {
-      res.status(404).json({ error: `Device ${deviceId} is not registered under user ${userId}.` });
+    // 1. Resolve the owning account from the globally unique hardware ID.
+    const registrySnapshot = await db.collection('deviceRegistry').doc(deviceId).get();
+    if (!registrySnapshot.exists) {
+      res.status(404).json({ error: `Device ${deviceId} is not registered in DILIG.` });
       return;
     }
 
-    const deviceDoc = devQuery.docs[0];
+    const registry = registrySnapshot.data();
+    if (!registry || registry.type !== 'sensor' || !registry.userId || !registry.deviceDocId) {
+      res.status(409).json({ error: `Device ${deviceId} is not registered as a soil sensor.` });
+      return;
+    }
+
+    const deviceRef = db.collection('users').doc(registry.userId).collection('devices').doc(registry.deviceDocId);
+    const deviceSnapshot = await deviceRef.get();
+    if (!deviceSnapshot.exists || deviceSnapshot.data()?.deviceId !== deviceId) {
+      res.status(409).json({ error: `Device registry for ${deviceId} is stale. Register the device again.` });
+      return;
+    }
+
     const now = Date.now();
 
     const readingData = {
@@ -58,18 +73,20 @@ export const recordTelemetry = functions.https.onRequest(async (req, res) => {
       recordedAt: now,
     };
 
-    // 2. Append to readings subcollection
-    await deviceDoc.ref.collection('readings').add(readingData);
+    // 2. Overwrite one deterministic reading document to avoid unbounded storage.
+    const batch = db.batch();
+    batch.set(deviceRef.collection('readings').doc('latest'), readingData);
 
-    // 3. Update device heartbeat and latest reading cache
-    await deviceDoc.ref.update({
+    // 3. Update device heartbeat and latest reading cache atomically.
+    batch.update(deviceRef, {
       status: 'online',
       lastSeenAt: now,
       latestReading: readingData,
       updatedAt: now,
     });
+    await batch.commit();
 
-    res.status(200).json({ success: true, timestamp: now });
+    res.status(200).json({ success: true, deviceId, timestamp: now });
   } catch (error: any) {
     console.error('Error saving telemetry:', error);
     res.status(500).json({ error: error.message || 'Internal Server Error' });
