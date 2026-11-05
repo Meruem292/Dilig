@@ -2,6 +2,13 @@
 
 #include <Arduino.h>
 
+// 0 = two-relay reversing motor with limit switches (this project)
+// 1 = single relay, OPEN energizes and CLOSE de-energizes
+// 2 = 180-degree servo, OPEN = 180° and CLOSE = 0°
+#ifndef DILIG_ACTUATOR_MODE
+#define DILIG_ACTUATOR_MODE 0
+#endif
+
 namespace config {
 
 constexpr uint8_t RELAY_OPEN_PIN = 25;
@@ -17,6 +24,8 @@ constexpr uint8_t OLED_HEIGHT = 64;
 // Common opto-isolated relay boards energize when their input is LOW.
 constexpr uint8_t RELAY_ON_LEVEL = LOW;
 constexpr uint8_t RELAY_OFF_LEVEL = HIGH;
+
+constexpr char DEVICE_ID_PREFIX[] = "DILIG-ACT-";
 
 // Fail-safe normally-closed switches connect GPIO to GND until the endpoint
 // opens the circuit. A triggered or broken wire therefore reads HIGH.

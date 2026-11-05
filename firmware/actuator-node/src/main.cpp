@@ -12,6 +12,10 @@
 #include "firmware_config.h"
 #include "tls_root_ca.h"
 
+#if DILIG_ACTUATOR_MODE == 2
+#include <ESP32Servo.h>
+#endif
+
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
@@ -74,6 +78,7 @@ struct CommandSnapshot {
   char status[16];
 };
 
+#if DILIG_ACTUATOR_MODE == 0
 class DebouncedLimit {
  public:
   explicit DebouncedLimit(const uint8_t pin) : pin_(pin) {}
@@ -104,6 +109,7 @@ class DebouncedLimit {
   uint8_t stable_ = LOW;
   uint32_t changedAtMs_ = 0;
 };
+#endif
 
 char g_deviceId[DEVICE_ID_CAPACITY] = {};
 QueueHandle_t g_commandQueue = nullptr;
@@ -158,7 +164,8 @@ void buildDeviceId() {
   snprintf(
       g_deviceId,
       sizeof(g_deviceId),
-      "DILIG-ACT-%012llX",
+      "%s%012llX",
+      config::DEVICE_ID_PREFIX,
       static_cast<unsigned long long>(chipId));
 }
 
@@ -174,6 +181,7 @@ int64_t epochMs() {
          static_cast<int64_t>(millis() % 1000UL);
 }
 
+#if DILIG_ACTUATOR_MODE == 0
 void stopMotor() {
   digitalWrite(config::RELAY_OPEN_PIN, config::RELAY_OFF_LEVEL);
   digitalWrite(config::RELAY_CLOSE_PIN, config::RELAY_OFF_LEVEL);
@@ -198,6 +206,15 @@ PhysicalState derivePhysicalState(
   if (openTriggered) return PhysicalState::Open;
   if (closedTriggered) return PhysicalState::Closed;
   return PhysicalState::Unknown;
+}
+#endif
+
+void safeOutput() {
+#if DILIG_ACTUATOR_MODE == 0
+  stopMotor();
+#elif DILIG_ACTUATOR_MODE == 1
+  digitalWrite(config::RELAY_MAIN_PIN, config::RELAY_OFF_LEVEL);
+#endif
 }
 
 void publishPhysicalState(const PhysicalState state) {
@@ -229,9 +246,15 @@ void renderDisplay(
   g_display.setTextColor(SSD1306_WHITE);
   g_display.setTextSize(1);
   g_display.setCursor(0, 0);
+#if DILIG_ACTUATOR_MODE == 1
+  g_display.println(F("DILIG MAIN GATE"));
+#elif DILIG_ACTUATOR_MODE == 2
+  g_display.println(F("DILIG SUB GATE"));
+#else
   g_display.println(F("DILIG GATE ACT"));
-  g_display.println(F("ID DILIG-ACT-"));
-  g_display.println(g_deviceId + strlen("DILIG-ACT-"));
+#endif
+  g_display.print(F("ID "));
+  g_display.println(g_deviceId);
   g_display.print(F("Gate: "));
   g_display.println(ui.assigned ? ui.gateName : "UNASSIGNED");
   g_display.print(F("State: "));
@@ -534,6 +557,7 @@ bool commitMotorResult(
          sendJson("POST", url, payload, static_cast<size_t>(length), httpCode);
 }
 
+#if DILIG_ACTUATOR_MODE == 0
 void motorTask(void*) {
   esp_task_wdt_add(nullptr);
   digitalWrite(config::RELAY_OPEN_PIN, config::RELAY_OFF_LEVEL);
@@ -634,6 +658,93 @@ void motorTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
+#else
+void motorTask(void*) {
+  esp_task_wdt_add(nullptr);
+
+#if DILIG_ACTUATOR_MODE == 1
+  pinMode(config::RELAY_MAIN_PIN, OUTPUT);
+  digitalWrite(config::RELAY_MAIN_PIN, config::RELAY_OFF_LEVEL);
+#else
+  Servo gateServo;
+  gateServo.setPeriodHertz(50);
+  gateServo.attach(config::SERVO_PIN, 500, 2400);
+  gateServo.write(config::SERVO_CLOSED_ANGLE);
+#endif
+
+  MotorCommand activeCommand{};
+  CommandAction activeAction = CommandAction::Close;
+  PhysicalState physicalState = PhysicalState::Closed;
+  PhysicalState lastPublishedState = PhysicalState::Unknown;
+  UiStatus ui{};
+  bool moving = false;
+#if DILIG_ACTUATOR_MODE == 2
+  uint32_t motionStartedMs = 0;
+#endif
+  uint32_t lastDisplayMs = 0;
+  uint32_t lastStackLogMs = 0;
+
+  for (;;) {
+    const uint32_t now = millis();
+    UiStatus incomingUi{};
+    while (xQueueReceive(g_uiQueue, &incomingUi, 0) == pdTRUE) ui = incomingUi;
+
+    if (!moving) {
+      MotorCommand command{};
+      if (xQueueReceive(g_commandQueue, &command, 0) == pdTRUE) {
+        activeCommand = command;
+        activeAction = command.action;
+#if DILIG_ACTUATOR_MODE == 1
+        // Main gate: OPEN energizes one relay; CLOSE releases it.
+        digitalWrite(
+            config::RELAY_MAIN_PIN,
+            command.action == CommandAction::Open ? config::RELAY_ON_LEVEL
+                                                   : config::RELAY_OFF_LEVEL);
+        physicalState =
+            command.action == CommandAction::Open ? PhysicalState::Open : PhysicalState::Closed;
+        publishMotorResult(command, true, physicalState, "");
+#else
+        // Sub gate: drive the servo to its configured endpoint, then allow
+        // a short non-blocking settling period before confirming the state.
+        gateServo.write(
+            command.action == CommandAction::Open ? config::SERVO_OPEN_ANGLE
+                                                   : config::SERVO_CLOSED_ANGLE);
+        moving = true;
+        motionStartedMs = now;
+        physicalState = PhysicalState::Moving;
+#endif
+      }
+    }
+
+#if DILIG_ACTUATOR_MODE == 2
+    if (moving && now - motionStartedMs >= config::SERVO_SETTLE_MS) {
+      moving = false;
+      physicalState =
+          activeAction == CommandAction::Open ? PhysicalState::Open : PhysicalState::Closed;
+      publishMotorResult(activeCommand, true, physicalState, "");
+    }
+#endif
+
+    if (physicalState != lastPublishedState) {
+      publishPhysicalState(physicalState);
+      lastPublishedState = physicalState;
+    }
+    if (now - lastDisplayMs >= config::DISPLAY_REFRESH_INTERVAL_MS) {
+      renderDisplay(physicalState, activeAction, moving, ui);
+      lastDisplayMs = now;
+    }
+    if (now - lastStackLogMs >= 60000) {
+      Serial.printf(
+          "[health] gate stack headroom=%u, heap=%u\n",
+          static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
+          static_cast<unsigned>(ESP.getFreeHeap()));
+      lastStackLogMs = now;
+    }
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+#endif
 
 void cloudTask(void*) {
   esp_task_wdt_add(nullptr);
@@ -794,11 +905,16 @@ void setup() {
   Serial.printf("Device ID: %s\n", g_deviceId);
 
   // Relays are forced off before either task can run.
+#if DILIG_ACTUATOR_MODE == 0
   digitalWrite(config::RELAY_OPEN_PIN, config::RELAY_OFF_LEVEL);
   digitalWrite(config::RELAY_CLOSE_PIN, config::RELAY_OFF_LEVEL);
   pinMode(config::RELAY_OPEN_PIN, OUTPUT);
   pinMode(config::RELAY_CLOSE_PIN, OUTPUT);
   stopMotor();
+#elif DILIG_ACTUATOR_MODE == 1
+  pinMode(config::RELAY_MAIN_PIN, OUTPUT);
+  digitalWrite(config::RELAY_MAIN_PIN, config::RELAY_OFF_LEVEL);
+#endif
 
   Wire.begin(config::OLED_SDA_PIN, config::OLED_SCL_PIN);
   g_displayAvailable = g_display.begin(SSD1306_SWITCHCAPVCC, config::OLED_I2C_ADDRESS);
@@ -812,7 +928,7 @@ void setup() {
   g_uiQueue = xQueueCreate(1, sizeof(UiStatus));
   if (g_commandQueue == nullptr || g_resultQueue == nullptr ||
       g_physicalQueue == nullptr || g_uiQueue == nullptr) {
-    stopMotor();
+    safeOutput();
     ESP.restart();
   }
 
@@ -834,7 +950,7 @@ void setup() {
       nullptr,
       0);
   if (motorCreated != pdPASS || cloudCreated != pdPASS) {
-    stopMotor();
+    safeOutput();
     ESP.restart();
   }
 }
