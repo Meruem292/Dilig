@@ -27,7 +27,8 @@ constexpr uint32_t DISPLAY_REFRESH_INTERVAL_MS = 250;
 constexpr uint32_t HTTP_TIMEOUT_MS = 10000;
 constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 30;
 constexpr uint32_t MOTOR_TASK_STACK_BYTES = 4096;
-constexpr uint32_t CLOUD_TASK_STACK_BYTES = 8192;
+// Firestore TLS + JSON parsing has deep mbedTLS call frames on ESP32.
+constexpr uint32_t CLOUD_TASK_STACK_BYTES = 24576;
 constexpr UBaseType_t MOTOR_TASK_PRIORITY = 3;
 constexpr UBaseType_t CLOUD_TASK_PRIORITY = 1;
 

@@ -116,6 +116,7 @@ QueueHandle_t g_commandQueue = nullptr;
 QueueHandle_t g_resultQueue = nullptr;
 QueueHandle_t g_physicalQueue = nullptr;
 QueueHandle_t g_uiQueue = nullptr;
+WiFiClientSecure g_cloudClient;
 
 Adafruit_SSD1306 g_display(config::OLED_WIDTH, config::OLED_HEIGHT, &Wire, -1);
 bool g_displayAvailable = false;
@@ -213,7 +214,8 @@ void safeOutput() {
 #if DILIG_ACTUATOR_MODE == 0
   stopMotor();
 #elif DILIG_ACTUATOR_MODE == 1
-  digitalWrite(config::RELAY_MAIN_PIN, config::RELAY_OFF_LEVEL);
+  digitalWrite(config::BTS7960_RPWM_PIN, LOW);
+  digitalWrite(config::BTS7960_LPWM_PIN, LOW);
 #endif
 }
 
@@ -271,24 +273,36 @@ void renderDisplay(
 }
 
 bool getJson(const char* url, JsonDocument& document, int& httpCode) {
-  WiFiClientSecure client;
-  client.setCACert(GOOGLE_TRUST_SERVICES_ROOT_R4);
   HTTPClient http;
+  http.setReuse(true);
   http.setConnectTimeout(config::HTTP_TIMEOUT_MS);
   http.setTimeout(config::HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) {
+  if (!http.begin(g_cloudClient, url)) {
     httpCode = -2;
     return false;
   }
+  const char* responseHeaders[] = {"Content-Type"};
+  http.collectHeaders(responseHeaders, 1);
   httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
+    if (httpCode > 0) http.getString();
     http.end();
     return false;
   }
-  const DeserializationError error = deserializeJson(document, http.getStream());
+
+  // Firestore responses may arrive using chunked transfer encoding. Buffer
+  // this small exact-document response so ArduinoJson never sees a partial
+  // stream and reports InvalidInput.
+  const String response = http.getString();
+  const String contentType = http.header("Content-Type");
+  const DeserializationError error = deserializeJson(document, response);
   http.end();
   if (error) {
-    Serial.printf("[cloud] JSON parse failed: %s\n", error.c_str());
+    Serial.printf(
+        "[cloud] JSON parse failed: %s (content-type=%s, bytes=%u)\n",
+        error.c_str(),
+        contentType.c_str(),
+        static_cast<unsigned>(response.length()));
     httpCode = -4;
     return false;
   }
@@ -301,12 +315,11 @@ bool sendJson(
     const char* payload,
     const size_t payloadLength,
     int& httpCode) {
-  WiFiClientSecure client;
-  client.setCACert(GOOGLE_TRUST_SERVICES_ROOT_R4);
   HTTPClient http;
+  http.setReuse(true);
   http.setConnectTimeout(config::HTTP_TIMEOUT_MS);
   http.setTimeout(config::HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) {
+  if (!http.begin(g_cloudClient, url)) {
     httpCode = -2;
     return false;
   }
@@ -315,6 +328,8 @@ bool sendJson(
       method,
       reinterpret_cast<uint8_t*>(const_cast<char*>(payload)),
       payloadLength);
+  // Drain the response so HTTPClient can reuse the established TLS socket.
+  if (httpCode > 0) http.getString();
   http.end();
   return httpCode >= 200 && httpCode < 300;
 }
@@ -663,8 +678,22 @@ void motorTask(void*) {
   esp_task_wdt_add(nullptr);
 
 #if DILIG_ACTUATOR_MODE == 1
-  pinMode(config::RELAY_MAIN_PIN, OUTPUT);
-  digitalWrite(config::RELAY_MAIN_PIN, config::RELAY_OFF_LEVEL);
+  pinMode(config::BTS7960_RPWM_PIN, OUTPUT);
+  pinMode(config::BTS7960_LPWM_PIN, OUTPUT);
+  digitalWrite(config::BTS7960_RPWM_PIN, LOW);
+  digitalWrite(config::BTS7960_LPWM_PIN, LOW);
+  ledcSetup(
+      config::BTS7960_RPWM_CHANNEL,
+      config::BTS7960_PWM_FREQUENCY_HZ,
+      config::BTS7960_PWM_RESOLUTION_BITS);
+  ledcSetup(
+      config::BTS7960_LPWM_CHANNEL,
+      config::BTS7960_PWM_FREQUENCY_HZ,
+      config::BTS7960_PWM_RESOLUTION_BITS);
+  ledcAttachPin(config::BTS7960_RPWM_PIN, config::BTS7960_RPWM_CHANNEL);
+  ledcAttachPin(config::BTS7960_LPWM_PIN, config::BTS7960_LPWM_CHANNEL);
+  ledcWrite(config::BTS7960_RPWM_CHANNEL, 0);
+  ledcWrite(config::BTS7960_LPWM_CHANNEL, 0);
 #else
   Servo gateServo;
   gateServo.setPeriodHertz(50);
@@ -678,7 +707,7 @@ void motorTask(void*) {
   PhysicalState lastPublishedState = PhysicalState::Unknown;
   UiStatus ui{};
   bool moving = false;
-#if DILIG_ACTUATOR_MODE == 2
+#if DILIG_ACTUATOR_MODE == 1 || DILIG_ACTUATOR_MODE == 2
   uint32_t motionStartedMs = 0;
 #endif
   uint32_t lastDisplayMs = 0;
@@ -695,14 +724,19 @@ void motorTask(void*) {
         activeCommand = command;
         activeAction = command.action;
 #if DILIG_ACTUATOR_MODE == 1
-        // Main gate: OPEN energizes one relay; CLOSE releases it.
-        digitalWrite(
-            config::RELAY_MAIN_PIN,
-            command.action == CommandAction::Open ? config::RELAY_ON_LEVEL
-                                                   : config::RELAY_OFF_LEVEL);
-        physicalState =
-            command.action == CommandAction::Open ? PhysicalState::Open : PhysicalState::Closed;
-        publishMotorResult(command, true, physicalState, "");
+        // Interlock first: never drive both BTS7960 directions together.
+        ledcWrite(config::BTS7960_RPWM_CHANNEL, 0);
+        ledcWrite(config::BTS7960_LPWM_CHANNEL, 0);
+        moving = true;
+        motionStartedMs = now;
+        physicalState = PhysicalState::Moving;
+        Serial.printf(
+            "[motor] %s started: %s PWM GPIO%u, duration=%lu ms\n",
+            command.action == CommandAction::Open ? "OPEN" : "CLOSE",
+            command.action == CommandAction::Open ? "LPWM" : "RPWM",
+            command.action == CommandAction::Open ? config::BTS7960_LPWM_PIN
+                                                   : config::BTS7960_RPWM_PIN,
+            static_cast<unsigned long>(config::BTS7960_TRAVEL_MS));
 #else
         // Sub gate: drive the servo to its configured endpoint, then allow
         // a short non-blocking settling period before confirming the state.
@@ -716,7 +750,39 @@ void motorTask(void*) {
       }
     }
 
-#if DILIG_ACTUATOR_MODE == 2
+#if DILIG_ACTUATOR_MODE == 1
+    if (moving) {
+      const uint32_t elapsedMs = now - motionStartedMs;
+      const uint8_t duty =
+          elapsedMs >= config::BTS7960_RAMP_MS
+              ? config::BTS7960_PWM_DUTY
+              : static_cast<uint8_t>(
+                    (static_cast<uint32_t>(config::BTS7960_PWM_DUTY) * elapsedMs) /
+                    config::BTS7960_RAMP_MS);
+
+      // The installed mechanism is reversed: OPEN uses LPWM and CLOSE uses
+      // RPWM. The inactive direction is always written low first.
+      if (activeAction == CommandAction::Open) {
+        ledcWrite(config::BTS7960_RPWM_CHANNEL, 0);
+        ledcWrite(config::BTS7960_LPWM_CHANNEL, duty);
+      } else {
+        ledcWrite(config::BTS7960_LPWM_CHANNEL, 0);
+        ledcWrite(config::BTS7960_RPWM_CHANNEL, duty);
+      }
+
+      if (elapsedMs >= config::BTS7960_TRAVEL_MS) {
+        ledcWrite(config::BTS7960_RPWM_CHANNEL, 0);
+        ledcWrite(config::BTS7960_LPWM_CHANNEL, 0);
+        moving = false;
+        physicalState =
+            activeAction == CommandAction::Open ? PhysicalState::Open : PhysicalState::Closed;
+        Serial.printf(
+            "[motor] %s finished; both PWM channels are OFF\n",
+            activeAction == CommandAction::Open ? "OPEN" : "CLOSE");
+        publishMotorResult(activeCommand, true, physicalState, "");
+      }
+    }
+#elif DILIG_ACTUATOR_MODE == 2
     if (moving && now - motionStartedMs >= config::SERVO_SETTLE_MS) {
       moving = false;
       physicalState =
@@ -759,6 +825,9 @@ void cloudTask(void*) {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
+  WiFi.setSleep(false);
+  g_cloudClient.setCACert(GOOGLE_TRUST_SERVICES_ROOT_R4);
+  g_cloudClient.setHandshakeTimeout(15);
 
   DeviceBinding binding{};
   UiStatus ui{};
@@ -771,12 +840,28 @@ void cloudTask(void*) {
   uint32_t lastBindingAttemptMs = 0;
   uint32_t lastHeartbeatMs = 0;
   uint32_t lastGatePollMs = 0;
+  uint32_t lastResourceReportMs = 0;
+  uint32_t lastListeningLogMs = 0;
   bool timeSyncStarted = false;
+  bool wasWifiConnected = false;
+  bool registrationLogged = false;
+  char lastLoggedGateId[FIRESTORE_ID_CAPACITY] = {};
 
   for (;;) {
     const uint32_t now = millis();
     const bool wifiConnected = WiFi.status() == WL_CONNECTED;
     ui.wifiConnected = wifiConnected;
+    if (wifiConnected && !wasWifiConnected) {
+      Serial.printf(
+          "[wifi] connected: IP=%s, RSSI=%d dBm\n",
+          WiFi.localIP().toString().c_str(),
+          WiFi.RSSI());
+    } else if (!wifiConnected && wasWifiConnected) {
+      Serial.println(F("[wifi] connection lost"));
+      registrationLogged = false;
+      lastLoggedGateId[0] = '\0';
+    }
+    wasWifiConnected = wifiConnected;
 
     PhysicalSnapshot physical{};
     while (xQueueReceive(g_physicalQueue, &physical, 0) == pdTRUE) {
@@ -788,6 +873,8 @@ void cloudTask(void*) {
 
     if (!wifiConnected &&
         (lastWifiAttemptMs == 0 || now - lastWifiAttemptMs >= config::WIFI_RECONNECT_INTERVAL_MS)) {
+      g_cloudClient.stop();
+      Serial.println(F("[wifi] connecting..."));
       WiFi.begin(DILIG_WIFI_SSID, DILIG_WIFI_PASSWORD);
       lastWifiAttemptMs = now;
       // Keep the gate/owner snapshot stable until an active motor result has
@@ -807,6 +894,15 @@ void cloudTask(void*) {
       esp_task_wdt_reset();
       if (!resolveBinding(binding, httpCode)) {
         if (httpCode == HTTP_CODE_NOT_FOUND) binding = DeviceBinding{};
+        Serial.printf("[cloud] registry lookup failed: HTTP %d\n", httpCode);
+        registrationLogged = false;
+      } else if (!registrationLogged || strcmp(lastLoggedGateId, binding.gateId) != 0) {
+        Serial.printf(
+            "[cloud] registered: %s, gate=%s\n",
+            g_deviceId,
+            binding.assigned ? binding.gateId : "UNASSIGNED");
+        strlcpy(lastLoggedGateId, binding.gateId, sizeof(lastLoggedGateId));
+        registrationLogged = true;
       }
       esp_task_wdt_reset();
       lastBindingAttemptMs = millis();
@@ -847,6 +943,10 @@ void cloudTask(void*) {
           esp_task_wdt_reset();
           if (fetchCommand(binding, gate.pendingCommandId, command, httpCode)) {
             if (strcmp(command.status, "pending") == 0) {
+              Serial.printf(
+                  "[web] command received: %s, id=%s\n",
+                  command.action == CommandAction::Open ? "OPEN" : "CLOSE",
+                  command.id);
               esp_task_wdt_reset();
               if (markCommandExecuting(binding, command.id, httpCode)) {
                 MotorCommand motorCommand{};
@@ -854,6 +954,9 @@ void cloudTask(void*) {
                 strlcpy(motorCommand.commandId, command.id, sizeof(motorCommand.commandId));
                 if (xQueueSend(g_commandQueue, &motorCommand, 0) == pdTRUE) {
                   commandInFlight = true;
+                  Serial.println(F("[web] command acknowledged and sent to motor task"));
+                } else {
+                  Serial.println(F("[web] motor queue busy; command not started"));
                 }
               }
               esp_task_wdt_reset();
@@ -889,7 +992,24 @@ void cloudTask(void*) {
       lastGatePollMs = millis();
     }
 
+    if (binding.assigned && wifiConnected && clockValid && !commandInFlight &&
+        !hasPendingResult &&
+        (lastListeningLogMs == 0 || now - lastListeningLogMs >= 10000)) {
+      Serial.printf(
+          "[web] listening for commands: gate=%s, poll=%lu ms\n",
+          binding.gateId,
+          static_cast<unsigned long>(config::GATE_POLL_INTERVAL_MS));
+      lastListeningLogMs = now;
+    }
+
     xQueueOverwrite(g_uiQueue, &ui);
+    if (lastResourceReportMs == 0 || now - lastResourceReportMs >= 60000) {
+      Serial.printf(
+          "[health] cloud stack free=%u, heap=%u\n",
+          static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
+          static_cast<unsigned>(ESP.getFreeHeap()));
+      lastResourceReportMs = now;
+    }
     esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(100));
   }
@@ -912,8 +1032,10 @@ void setup() {
   pinMode(config::RELAY_CLOSE_PIN, OUTPUT);
   stopMotor();
 #elif DILIG_ACTUATOR_MODE == 1
-  pinMode(config::RELAY_MAIN_PIN, OUTPUT);
-  digitalWrite(config::RELAY_MAIN_PIN, config::RELAY_OFF_LEVEL);
+  pinMode(config::BTS7960_RPWM_PIN, OUTPUT);
+  pinMode(config::BTS7960_LPWM_PIN, OUTPUT);
+  digitalWrite(config::BTS7960_RPWM_PIN, LOW);
+  digitalWrite(config::BTS7960_LPWM_PIN, LOW);
 #endif
 
   Wire.begin(config::OLED_SDA_PIN, config::OLED_SCL_PIN);

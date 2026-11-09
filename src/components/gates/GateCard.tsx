@@ -138,6 +138,14 @@ export const GateCard: React.FC<GateCardProps> = ({
 
       {/* Action Buttons: Large Open / Close Controls */}
       <div className="pt-3 border-t border-slate-100 mt-2">
+        <div className="mb-2.5">
+          <p className="text-xs font-bold uppercase tracking-wide text-charcoal">
+            Manual Gate Control
+          </p>
+          <p className="text-[11px] text-charcoal-muted mt-0.5">
+            Send an Open or Close command directly to the assigned controller.
+          </p>
+        </div>
         <div className="grid grid-cols-2 gap-2.5">
           <Button
             type="button"
@@ -148,7 +156,7 @@ export const GateCard: React.FC<GateCardProps> = ({
             disabled={!hasActuator || !actuatorOnline || isMoving || isOpen}
             className="w-full"
           >
-            {isOpen ? 'Already Open' : 'Open Gate'}
+            {isOpen ? 'Gate Open' : 'Manual Open'}
           </Button>
 
           <Button
@@ -160,7 +168,7 @@ export const GateCard: React.FC<GateCardProps> = ({
             disabled={!hasActuator || !actuatorOnline || isMoving || isClosed}
             className="w-full"
           >
-            {isClosed ? 'Already Closed' : 'Close Gate'}
+            {isClosed ? 'Gate Closed' : 'Manual Close'}
           </Button>
         </div>
 

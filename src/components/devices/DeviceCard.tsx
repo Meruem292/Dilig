@@ -228,29 +228,42 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
           ) : null}
 
           {assignedGate && (
-            <div className="grid grid-cols-2 gap-2.5 mt-2.5">
-              <Button
-                type="button"
-                variant="primary"
-                size="md"
-                leftIcon={<ArrowUpRight className="w-4 h-4" />}
-                onClick={() => setConfirmAction('OPEN')}
-                disabled={!online || isMoving || isOpen}
-                className="w-full"
-              >
-                {isOpen ? 'Already Open' : 'Open Gate'}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="md"
-                leftIcon={<ArrowDownLeft className="w-4 h-4" />}
-                onClick={() => setConfirmAction('CLOSE')}
-                disabled={!online || isMoving || isClosed}
-                className="w-full"
-              >
-                {isClosed ? 'Already Closed' : 'Close Gate'}
-              </Button>
+            <div className="mt-2.5">
+              <div className="flex items-center justify-between gap-3 mb-2.5">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wide text-charcoal">
+                    Manual Gate Control
+                  </p>
+                  <p className="text-[11px] text-charcoal-muted mt-0.5">
+                    Controls {assignedGate.name}
+                  </p>
+                </div>
+                <GateStatusBadge state={assignedGate.reportedState} size="sm" />
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="md"
+                  leftIcon={<ArrowUpRight className="w-4 h-4" />}
+                  onClick={() => setConfirmAction('OPEN')}
+                  disabled={!online || isMoving || isOpen}
+                  className="w-full"
+                >
+                  {isOpen ? 'Gate Open' : 'Manual Open'}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="md"
+                  leftIcon={<ArrowDownLeft className="w-4 h-4" />}
+                  onClick={() => setConfirmAction('CLOSE')}
+                  disabled={!online || isMoving || isClosed}
+                  className="w-full"
+                >
+                  {isClosed ? 'Gate Closed' : 'Manual Close'}
+                </Button>
+              </div>
             </div>
           )}
         </div>
@@ -295,7 +308,7 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
         onClose={() => setConfirmAction(null)}
         onConfirm={handleCommandConfirm}
         title={confirmAction === 'OPEN' ? 'Open Irrigation Gate?' : 'Close Irrigation Gate?'}
-        message={`Are you sure you want to ${confirmAction || ''} "${assignedGate?.name || 'this gate'}"? The physical actuator will move until its limit switch is reached.`}
+        message={`Are you sure you want to ${confirmAction || ''} "${assignedGate?.name || 'this gate'}"? The assigned controller will run its configured movement cycle and stop automatically.`}
         confirmLabel={confirmAction === 'OPEN' ? 'Yes, Open Gate' : 'Yes, Close Gate'}
         variant={confirmAction === 'OPEN' ? 'primary' : 'secondary'}
         isLoading={isSendingCommand}
