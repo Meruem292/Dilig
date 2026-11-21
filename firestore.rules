@@ -2,6 +2,13 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Main-gate timing fields on users/{uid}/devices/{deviceDocId}:
+    // openDurationMs/closeDurationMs are integer milliseconds (5000..60000).
+    // timingUpdatedAt is a server timestamp written only with a timing change.
+    // Sub-gate calibration fields on the same device documents:
+    // servoOpenAngle/servoCloseAngle are distinct integer degrees (0..180).
+    // servoConfigUpdatedAt is written only with a protected calibration change.
+
     // Helper functions
     function isAuthenticated() {
       return request.auth != null;
@@ -9,6 +16,77 @@ service cloud.firestore {
 
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRecentAuthentication() {
+      return isAuthenticated() &&
+        request.auth.token.auth_time is int &&
+        request.auth.token.auth_time >= (request.time.toMillis() / 1000) - 300;
+    }
+
+    function isValidOwnerDeviceUpdate(userId) {
+      let affected = request.resource.data.diff(resource.data).affectedKeys();
+      let changesTiming = affected.hasAny([
+        'openDurationMs',
+        'closeDurationMs',
+        'timingUpdatedAt'
+      ]);
+      let changesServoConfig = affected.hasAny([
+        'servoOpenAngle',
+        'servoCloseAngle',
+        'servoConfigUpdatedAt'
+      ]);
+      return isOwner(userId) &&
+        ((!changesTiming && !changesServoConfig) ||
+          (changesTiming && !changesServoConfig &&
+            affected.hasOnly([
+              'openDurationMs',
+              'closeDurationMs',
+              'timingUpdatedAt'
+            ]) &&
+            resource.data.type == 'actuator' &&
+            request.resource.data.type == 'actuator' &&
+            resource.data.deviceId.matches('^DILIG-MAIN-[A-F0-9]{12}$') &&
+            request.resource.data.deviceId == resource.data.deviceId &&
+            request.resource.data.openDurationMs is int &&
+            request.resource.data.openDurationMs >= 5000 &&
+            request.resource.data.openDurationMs <= 60000 &&
+            request.resource.data.closeDurationMs is int &&
+            request.resource.data.closeDurationMs >= 5000 &&
+            request.resource.data.closeDurationMs <= 60000 &&
+            request.resource.data.timingUpdatedAt == request.time &&
+            hasRecentAuthentication()) ||
+          (!changesTiming && changesServoConfig &&
+            affected.hasOnly([
+              'servoOpenAngle',
+              'servoCloseAngle',
+              'servoConfigUpdatedAt'
+            ]) &&
+            resource.data.type == 'actuator' &&
+            request.resource.data.type == 'actuator' &&
+            resource.data.deviceId.matches('^DILIG-SUB-[A-F0-9]{12}$') &&
+            request.resource.data.deviceId == resource.data.deviceId &&
+            request.resource.data.servoOpenAngle is int &&
+            request.resource.data.servoOpenAngle >= 0 &&
+            request.resource.data.servoOpenAngle <= 180 &&
+            request.resource.data.servoCloseAngle is int &&
+            request.resource.data.servoCloseAngle >= 0 &&
+            request.resource.data.servoCloseAngle <= 180 &&
+            request.resource.data.servoOpenAngle != request.resource.data.servoCloseAngle &&
+            request.resource.data.servoConfigUpdatedAt == request.time &&
+            hasRecentAuthentication()));
+    }
+
+    function isValidOwnerDeviceCreate(userId) {
+      return isOwner(userId) &&
+        !request.resource.data.keys().hasAny([
+          'openDurationMs',
+          'closeDurationMs',
+          'timingUpdatedAt',
+          'servoOpenAngle',
+          'servoCloseAngle',
+          'servoConfigUpdatedAt'
+        ]);
     }
 
     function isValidMoisture(val) {
@@ -212,8 +290,9 @@ service cloud.firestore {
       match /devices/{deviceDocId} {
         allow get: if isOwner(userId) || isRegisteredActuatorDeviceRead(userId, deviceDocId);
         allow list: if isOwner(userId);
-        allow create, delete: if isOwner(userId);
-        allow update: if isOwner(userId) ||
+        allow create: if isValidOwnerDeviceCreate(userId);
+        allow delete: if isOwner(userId);
+        allow update: if isValidOwnerDeviceUpdate(userId) ||
           isRegisteredSensorDeviceUpdate(userId, deviceDocId) ||
           isRegisteredActuatorHeartbeat(userId, deviceDocId);
 

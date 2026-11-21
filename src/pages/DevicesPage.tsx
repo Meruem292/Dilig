@@ -12,6 +12,8 @@ export interface DevicesPageProps {
   onUpdateDeviceName: (device: Device, newName: string) => Promise<void>;
   onDeleteDevice: (device: Device) => Promise<void>;
   onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
+  onUpdateTiming: (device: Device, openDurationMs: number, closeDurationMs: number) => Promise<void>;
+  onUpdateServoAngles: (device: Device, openAngle: number, closeAngle: number) => Promise<void>;
 }
 
 export const DevicesPage: React.FC<DevicesPageProps> = ({
@@ -21,6 +23,8 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({
   onUpdateDeviceName,
   onDeleteDevice,
   onSendCommand,
+  onUpdateTiming,
+  onUpdateServoAngles,
 }) => {
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'sensor' | 'actuator'>('all');
@@ -149,6 +153,8 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({
               onUpdateName={onUpdateDeviceName}
               onDelete={onDeleteDevice}
               onSendCommand={onSendCommand}
+              onUpdateTiming={onUpdateTiming}
+              onUpdateServoAngles={onUpdateServoAngles}
             />
           ))}
         </div>

@@ -8,6 +8,7 @@ import {
   orderBy,
   runTransaction,
   writeBatch,
+  serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import type { Device, DeviceType } from '../types';
@@ -48,6 +49,12 @@ export const subscribeToUserDevices = (
           assignedGateId: data.assignedGateId || null,
           latestReading: data.latestReading || null,
           registryVersion: data.registryVersion || undefined,
+          openDurationMs: typeof data.openDurationMs === 'number' ? data.openDurationMs : undefined,
+          closeDurationMs: typeof data.closeDurationMs === 'number' ? data.closeDurationMs : undefined,
+          timingUpdatedAt: data.timingUpdatedAt?.toMillis?.() ?? null,
+          servoOpenAngle: typeof data.servoOpenAngle === 'number' ? data.servoOpenAngle : undefined,
+          servoCloseAngle: typeof data.servoCloseAngle === 'number' ? data.servoCloseAngle : undefined,
+          servoConfigUpdatedAt: data.servoConfigUpdatedAt?.toMillis?.() ?? null,
         };
       });
       onUpdate(devices);
@@ -69,6 +76,10 @@ export const ensureDeviceRegistry = async (
   device: Device
 ): Promise<void> => {
   if (!db) return;
+  // Version 1 devices were created in the same atomic batch as their registry
+  // document. Re-running the legacy repair can race the batch's local snapshot
+  // and produce a registry-only write that security rules correctly reject.
+  if (device.registryVersion === 1) return;
 
   const hardwareId = device.deviceId.trim().toUpperCase();
   if (!DEVICE_ID_PATTERN.test(hardwareId)) {
@@ -177,6 +188,49 @@ export const updateDeviceName = async (
   await updateDoc(deviceDocRef, {
     name: trimmedName,
     updatedAt: Date.now(),
+  });
+};
+
+export const updateMainGateTiming = async (
+  userId: string,
+  deviceDocId: string,
+  openDurationMs: number,
+  closeDurationMs: number
+): Promise<void> => {
+  if (!db) throw new Error('Firestore is not initialized.');
+
+  const durations = [openDurationMs, closeDurationMs];
+  if (durations.some((value) => !Number.isInteger(value) || value < 5000 || value > 60000)) {
+    throw new Error('Open and close times must each be between 5 and 60 seconds.');
+  }
+
+  await updateDoc(doc(db, 'users', userId, 'devices', deviceDocId), {
+    openDurationMs,
+    closeDurationMs,
+    timingUpdatedAt: serverTimestamp(),
+  });
+};
+
+export const updateSubGateAngles = async (
+  userId: string,
+  deviceDocId: string,
+  openAngle: number,
+  closeAngle: number
+): Promise<void> => {
+  if (!db) throw new Error('Firestore is not initialized.');
+
+  const angles = [openAngle, closeAngle];
+  if (angles.some((value) => !Number.isInteger(value) || value < 0 || value > 180)) {
+    throw new Error('Open and close angles must each be whole numbers from 0° to 180°.');
+  }
+  if (openAngle === closeAngle) {
+    throw new Error('Open and close angles must be different.');
+  }
+
+  await updateDoc(doc(db, 'users', userId, 'devices', deviceDocId), {
+    servoOpenAngle: openAngle,
+    servoCloseAngle: closeAngle,
+    servoConfigUpdatedAt: serverTimestamp(),
   });
 };
 

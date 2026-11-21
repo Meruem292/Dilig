@@ -20,6 +20,8 @@ import {
   updateDeviceName,
   deleteDevice,
   ensureDeviceRegistry,
+  updateMainGateTiming,
+  updateSubGateAngles,
 } from './services/deviceService';
 import { subscribeToUserGates, createGate, updateGate, deleteGate } from './services/gateService';
 import { sendGateCommand } from './services/commandService';
@@ -99,6 +101,12 @@ const MainApp: React.FC = () => {
     if (!currentUser) return;
 
     for (const device of devices) {
+      // New registrations create the device and registry atomically. The
+      // realtime listener may expose the local pending device before that
+      // batch reaches the server, so never start a competing registry-only
+      // repair for records already using the current registry contract.
+      if (device.registryVersion === 1) continue;
+
       const repairKey = `${currentUser.uid}/${device.id}`;
       if (registryRepairs.current.has(repairKey)) continue;
 
@@ -197,6 +205,42 @@ const MainApp: React.FC = () => {
     }
   };
 
+  const handleUpdateMainGateTiming = async (
+    device: Device,
+    openDurationMs: number,
+    closeDurationMs: number
+  ) => {
+    if (!currentUser) return;
+    try {
+      await updateMainGateTiming(currentUser.uid, device.id, openDurationMs, closeDurationMs);
+      showSuccess(
+        'Gate timing updated',
+        `${device.name} will open for ${openDurationMs / 1000}s and close for ${closeDurationMs / 1000}s.`
+      );
+    } catch (err: unknown) {
+      showError('Timing update failed', (err as Error).message || 'Could not update gate timing.');
+      throw err;
+    }
+  };
+
+  const handleUpdateSubGateAngles = async (
+    device: Device,
+    openAngle: number,
+    closeAngle: number
+  ) => {
+    if (!currentUser) return;
+    try {
+      await updateSubGateAngles(currentUser.uid, device.id, openAngle, closeAngle);
+      showSuccess(
+        'Servo angles updated',
+        `${device.name} will open to ${openAngle}° and close to ${closeAngle}°.`
+      );
+    } catch (err: unknown) {
+      showError('Angle update failed', (err as Error).message || 'Could not update servo angles.');
+      throw err;
+    }
+  };
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -268,6 +312,8 @@ const MainApp: React.FC = () => {
               onUpdateDeviceName={handleUpdateDeviceName}
               onDeleteDevice={handleDeleteDevice}
               onSendCommand={handleSendCommand}
+              onUpdateTiming={handleUpdateMainGateTiming}
+              onUpdateServoAngles={handleUpdateSubGateAngles}
             />
           )}
         </>

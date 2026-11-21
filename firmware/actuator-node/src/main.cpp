@@ -38,6 +38,8 @@ enum class PhysicalState : uint8_t { Unknown, Open, Closed, Moving, Error };
 struct MotorCommand {
   CommandAction action;
   char commandId[FIRESTORE_ID_CAPACITY];
+  uint32_t durationMs;
+  uint8_t targetAngle;
 };
 
 struct MotorResult {
@@ -64,6 +66,13 @@ struct DeviceBinding {
   char gateId[FIRESTORE_ID_CAPACITY];
   bool registered;
   bool assigned;
+#if DILIG_ACTUATOR_MODE == 1
+  uint32_t openDurationMs;
+  uint32_t closeDurationMs;
+#elif DILIG_ACTUATOR_MODE == 2
+  uint8_t servoOpenAngle;
+  uint8_t servoCloseAngle;
+#endif
 };
 
 struct GateSnapshot {
@@ -77,6 +86,13 @@ struct CommandSnapshot {
   CommandAction action;
   char status[16];
 };
+
+#if DILIG_ACTUATOR_MODE == 2
+struct ServoConfig {
+  uint8_t openAngle;
+  uint8_t closeAngle;
+};
+#endif
 
 #if DILIG_ACTUATOR_MODE == 0
 class DebouncedLimit {
@@ -116,6 +132,9 @@ QueueHandle_t g_commandQueue = nullptr;
 QueueHandle_t g_resultQueue = nullptr;
 QueueHandle_t g_physicalQueue = nullptr;
 QueueHandle_t g_uiQueue = nullptr;
+#if DILIG_ACTUATOR_MODE == 2
+QueueHandle_t g_servoConfigQueue = nullptr;
+#endif
 WiFiClientSecure g_cloudClient;
 
 Adafruit_SSD1306 g_display(config::OLED_WIDTH, config::OLED_HEIGHT, &Wire, -1);
@@ -373,6 +392,48 @@ bool resolveBinding(DeviceBinding& binding, int& httpCode) {
       DILIG_FIREBASE_API_KEY);
   JsonDocument device;
   if (!getJson(url, device, httpCode)) return false;
+
+#if DILIG_ACTUATOR_MODE == 1
+  const char* openDurationValue =
+      device["fields"]["openDurationMs"]["integerValue"] | "";
+  const char* closeDurationValue =
+      device["fields"]["closeDurationMs"]["integerValue"] | "";
+  const unsigned long configuredOpenMs = strtoul(openDurationValue, nullptr, 10);
+  const unsigned long configuredCloseMs = strtoul(closeDurationValue, nullptr, 10);
+  binding.openDurationMs =
+      configuredOpenMs >= config::BTS7960_MIN_TRAVEL_MS &&
+              configuredOpenMs <= config::BTS7960_MAX_TRAVEL_MS
+          ? static_cast<uint32_t>(configuredOpenMs)
+          : config::BTS7960_DEFAULT_TRAVEL_MS;
+  binding.closeDurationMs =
+      configuredCloseMs >= config::BTS7960_MIN_TRAVEL_MS &&
+              configuredCloseMs <= config::BTS7960_MAX_TRAVEL_MS
+          ? static_cast<uint32_t>(configuredCloseMs)
+          : config::BTS7960_DEFAULT_TRAVEL_MS;
+#elif DILIG_ACTUATOR_MODE == 2
+  const char* openAngleValue =
+      device["fields"]["servoOpenAngle"]["integerValue"] | "";
+  const char* closeAngleValue =
+      device["fields"]["servoCloseAngle"]["integerValue"] | "";
+  const unsigned long configuredOpenAngle = strtoul(openAngleValue, nullptr, 10);
+  const unsigned long configuredCloseAngle = strtoul(closeAngleValue, nullptr, 10);
+  const bool anglesAreValid =
+      strlen(openAngleValue) > 0 &&
+      strlen(closeAngleValue) > 0 &&
+      configuredOpenAngle <= 180 &&
+      configuredCloseAngle <= 180 &&
+      configuredOpenAngle != configuredCloseAngle;
+  binding.servoOpenAngle = anglesAreValid
+                               ? static_cast<uint8_t>(configuredOpenAngle)
+                               : config::SERVO_OPEN_ANGLE;
+  binding.servoCloseAngle = anglesAreValid
+                                ? static_cast<uint8_t>(configuredCloseAngle)
+                                : config::SERVO_CLOSED_ANGLE;
+  const ServoConfig servoConfig{
+      binding.servoOpenAngle,
+      binding.servoCloseAngle};
+  xQueueOverwrite(g_servoConfigQueue, &servoConfig);
+#endif
 
   const char* assignedGateId = device["fields"]["assignedGateId"]["stringValue"] | "";
   binding.assigned = strlen(assignedGateId) > 0 &&
@@ -695,20 +756,38 @@ void motorTask(void*) {
   ledcWrite(config::BTS7960_RPWM_CHANNEL, 0);
   ledcWrite(config::BTS7960_LPWM_CHANNEL, 0);
 #else
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
   Servo gateServo;
   gateServo.setPeriodHertz(50);
-  gateServo.attach(config::SERVO_PIN, 500, 2400);
-  gateServo.write(config::SERVO_CLOSED_ANGLE);
+  bool servoAttached = false;
+  int currentAngle = config::SERVO_CLOSED_ANGLE;
+  int targetAngle = config::SERVO_CLOSED_ANGLE;
+  Serial.printf(
+      "[servo] awaiting cloud endpoints: GPIO%u, defaults CLOSED=%u deg, OPEN=%u deg, step=%lu ms\n",
+      config::SERVO_PIN,
+      config::SERVO_CLOSED_ANGLE,
+      config::SERVO_OPEN_ANGLE,
+      static_cast<unsigned long>(config::SERVO_STEP_INTERVAL_MS));
 #endif
 
   MotorCommand activeCommand{};
   CommandAction activeAction = CommandAction::Close;
+#if DILIG_ACTUATOR_MODE == 2
+  PhysicalState physicalState = PhysicalState::Unknown;
+#else
   PhysicalState physicalState = PhysicalState::Closed;
+#endif
   PhysicalState lastPublishedState = PhysicalState::Unknown;
   UiStatus ui{};
   bool moving = false;
 #if DILIG_ACTUATOR_MODE == 1 || DILIG_ACTUATOR_MODE == 2
   uint32_t motionStartedMs = 0;
+#endif
+#if DILIG_ACTUATOR_MODE == 2
+  uint32_t lastServoStepMs = 0;
 #endif
   uint32_t lastDisplayMs = 0;
   uint32_t lastStackLogMs = 0;
@@ -717,6 +796,32 @@ void motorTask(void*) {
     const uint32_t now = millis();
     UiStatus incomingUi{};
     while (xQueueReceive(g_uiQueue, &incomingUi, 0) == pdTRUE) ui = incomingUi;
+
+#if DILIG_ACTUATOR_MODE == 2
+    ServoConfig incomingServoConfig{};
+    while (xQueueReceive(g_servoConfigQueue, &incomingServoConfig, 0) == pdTRUE) {
+      if (!servoAttached) {
+        const int attachedChannel = gateServo.attach(
+            config::SERVO_PIN,
+            config::SERVO_MIN_PULSE_US,
+            config::SERVO_MAX_PULSE_US);
+        if (attachedChannel < 0) {
+          Serial.println(F("[servo] attach failed; restarting safely"));
+          ESP.restart();
+        }
+        currentAngle = incomingServoConfig.closeAngle;
+        targetAngle = currentAngle;
+        gateServo.write(currentAngle);
+        servoAttached = true;
+        physicalState = PhysicalState::Closed;
+        Serial.printf(
+            "[servo] ready: GPIO%u, CLOSED=%u deg, OPEN=%u deg\n",
+            config::SERVO_PIN,
+            incomingServoConfig.closeAngle,
+            incomingServoConfig.openAngle);
+      }
+    }
+#endif
 
     if (!moving) {
       MotorCommand command{};
@@ -736,16 +841,35 @@ void motorTask(void*) {
             command.action == CommandAction::Open ? "LPWM" : "RPWM",
             command.action == CommandAction::Open ? config::BTS7960_LPWM_PIN
                                                    : config::BTS7960_RPWM_PIN,
-            static_cast<unsigned long>(config::BTS7960_TRAVEL_MS));
+            static_cast<unsigned long>(command.durationMs));
 #else
-        // Sub gate: drive the servo to its configured endpoint, then allow
-        // a short non-blocking settling period before confirming the state.
-        gateServo.write(
-            command.action == CommandAction::Open ? config::SERVO_OPEN_ANGLE
-                                                   : config::SERVO_CLOSED_ANGLE);
-        moving = true;
-        motionStartedMs = now;
-        physicalState = PhysicalState::Moving;
+        // Sub gate: use the field-tested calibrated endpoints and move one
+        // degree at a time without blocking the RTOS task.
+        targetAngle = command.targetAngle;
+        if (!servoAttached) {
+          physicalState = PhysicalState::Error;
+          publishMotorResult(activeCommand, false, physicalState, "Servo configuration unavailable");
+          Serial.println(F("[servo] command rejected; cloud endpoints are unavailable"));
+        } else if (currentAngle == targetAngle) {
+          physicalState = command.action == CommandAction::Open
+                              ? PhysicalState::Open
+                              : PhysicalState::Closed;
+          publishMotorResult(activeCommand, true, physicalState, "");
+          Serial.printf(
+              "[servo] already %s at %d deg\n",
+              command.action == CommandAction::Open ? "OPEN" : "CLOSED",
+              currentAngle);
+        } else {
+          moving = true;
+          motionStartedMs = now;
+          lastServoStepMs = now;
+          physicalState = PhysicalState::Moving;
+          Serial.printf(
+              "[servo] %s: %d -> %d deg\n",
+              command.action == CommandAction::Open ? "OPENING" : "CLOSING",
+              currentAngle,
+              targetAngle);
+        }
 #endif
       }
     }
@@ -770,7 +894,7 @@ void motorTask(void*) {
         ledcWrite(config::BTS7960_RPWM_CHANNEL, duty);
       }
 
-      if (elapsedMs >= config::BTS7960_TRAVEL_MS) {
+      if (elapsedMs >= activeCommand.durationMs) {
         ledcWrite(config::BTS7960_RPWM_CHANNEL, 0);
         ledcWrite(config::BTS7960_LPWM_CHANNEL, 0);
         moving = false;
@@ -783,11 +907,26 @@ void motorTask(void*) {
       }
     }
 #elif DILIG_ACTUATOR_MODE == 2
-    if (moving && now - motionStartedMs >= config::SERVO_SETTLE_MS) {
-      moving = false;
-      physicalState =
-          activeAction == CommandAction::Open ? PhysicalState::Open : PhysicalState::Closed;
-      publishMotorResult(activeCommand, true, physicalState, "");
+    if (moving && now - lastServoStepMs >= config::SERVO_STEP_INTERVAL_MS) {
+      // Preserve the tested sketch exactly: command only one degree per step.
+      // Advancing the schedule by the interval (instead of resetting it to
+      // now) prevents normal 10 ms task jitter from slowing the motion.
+      currentAngle += currentAngle < targetAngle ? 1 : -1;
+      gateServo.write(currentAngle);
+      lastServoStepMs += config::SERVO_STEP_INTERVAL_MS;
+
+      if (currentAngle == targetAngle) {
+        moving = false;
+        physicalState = activeAction == CommandAction::Open
+                            ? PhysicalState::Open
+                            : PhysicalState::Closed;
+        Serial.printf(
+            "[servo] %s complete at %d deg in %lu ms\n",
+            activeAction == CommandAction::Open ? "OPEN" : "CLOSE",
+            currentAngle,
+            static_cast<unsigned long>(now - motionStartedMs));
+        publishMotorResult(activeCommand, true, physicalState, "");
+      }
     }
 #endif
 
@@ -901,6 +1040,17 @@ void cloudTask(void*) {
             "[cloud] registered: %s, gate=%s\n",
             g_deviceId,
             binding.assigned ? binding.gateId : "UNASSIGNED");
+#if DILIG_ACTUATOR_MODE == 1
+        Serial.printf(
+            "[config] gate timing: OPEN=%lu ms, CLOSE=%lu ms\n",
+            static_cast<unsigned long>(binding.openDurationMs),
+            static_cast<unsigned long>(binding.closeDurationMs));
+#elif DILIG_ACTUATOR_MODE == 2
+        Serial.printf(
+            "[config] servo angles: OPEN=%u deg, CLOSE=%u deg\n",
+            binding.servoOpenAngle,
+            binding.servoCloseAngle);
+#endif
         strlcpy(lastLoggedGateId, binding.gateId, sizeof(lastLoggedGateId));
         registrationLogged = true;
       }
@@ -940,8 +1090,36 @@ void cloudTask(void*) {
 
         if (!commandInFlight && strlen(gate.pendingCommandId) > 0) {
           CommandSnapshot command{};
+          bool commandConfigReady = true;
+#if DILIG_ACTUATOR_MODE == 1 || DILIG_ACTUATOR_MODE == 2
+          // Re-read the device document immediately before accepting work so
+          // protected actuator settings cannot race a newly queued command.
+          DeviceBinding refreshedBinding{};
+          commandConfigReady = resolveBinding(refreshedBinding, httpCode) &&
+                               refreshedBinding.assigned &&
+                               strcmp(refreshedBinding.gateId, binding.gateId) == 0;
+          if (commandConfigReady) {
+            binding = refreshedBinding;
+#if DILIG_ACTUATOR_MODE == 1
+            Serial.printf(
+                "[config] command timing verified: OPEN=%lu ms, CLOSE=%lu ms\n",
+                static_cast<unsigned long>(binding.openDurationMs),
+                static_cast<unsigned long>(binding.closeDurationMs));
+#else
+            Serial.printf(
+                "[config] command angles verified: OPEN=%u deg, CLOSE=%u deg\n",
+                binding.servoOpenAngle,
+                binding.servoCloseAngle);
+#endif
+          } else {
+            Serial.printf(
+                "[config] command paused; actuator configuration verification failed: HTTP %d\n",
+                httpCode);
+          }
+#endif
           esp_task_wdt_reset();
-          if (fetchCommand(binding, gate.pendingCommandId, command, httpCode)) {
+          if (commandConfigReady &&
+              fetchCommand(binding, gate.pendingCommandId, command, httpCode)) {
             if (strcmp(command.status, "pending") == 0) {
               Serial.printf(
                   "[web] command received: %s, id=%s\n",
@@ -951,6 +1129,19 @@ void cloudTask(void*) {
               if (markCommandExecuting(binding, command.id, httpCode)) {
                 MotorCommand motorCommand{};
                 motorCommand.action = command.action;
+#if DILIG_ACTUATOR_MODE == 1
+                motorCommand.durationMs =
+                    command.action == CommandAction::Open ? binding.openDurationMs
+                                                          : binding.closeDurationMs;
+#elif DILIG_ACTUATOR_MODE == 2
+                motorCommand.durationMs = 0;
+                motorCommand.targetAngle =
+                    command.action == CommandAction::Open ? binding.servoOpenAngle
+                                                          : binding.servoCloseAngle;
+#else
+                motorCommand.durationMs = 0;
+                motorCommand.targetAngle = 0;
+#endif
                 strlcpy(motorCommand.commandId, command.id, sizeof(motorCommand.commandId));
                 if (xQueueSend(g_commandQueue, &motorCommand, 0) == pdTRUE) {
                   commandInFlight = true;
@@ -1048,8 +1239,15 @@ void setup() {
   g_resultQueue = xQueueCreate(2, sizeof(MotorResult));
   g_physicalQueue = xQueueCreate(1, sizeof(PhysicalSnapshot));
   g_uiQueue = xQueueCreate(1, sizeof(UiStatus));
+#if DILIG_ACTUATOR_MODE == 2
+  g_servoConfigQueue = xQueueCreate(1, sizeof(ServoConfig));
+#endif
   if (g_commandQueue == nullptr || g_resultQueue == nullptr ||
-      g_physicalQueue == nullptr || g_uiQueue == nullptr) {
+      g_physicalQueue == nullptr || g_uiQueue == nullptr
+#if DILIG_ACTUATOR_MODE == 2
+      || g_servoConfigQueue == nullptr
+#endif
+      ) {
     safeOutput();
     ESP.restart();
   }

@@ -5,6 +5,8 @@ import { Badge } from '../common/Badge';
 import { DeviceTypeBadge } from './DeviceTypeBadge';
 import { GateStatusBadge } from '../gates/GateStatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
+import { MainGateTimingModal } from './MainGateTimingModal';
+import { SubGateAngleModal } from './SubGateAngleModal';
 import {
   Cpu,
   Clock,
@@ -17,6 +19,8 @@ import {
   ArrowUpRight,
   ArrowDownLeft,
   AlertTriangle,
+  TimerReset,
+  RotateCw,
 } from 'lucide-react';
 import type { CommandAction, Device, Gate } from '../../types';
 import { isDeviceOnline } from '../../services/deviceService';
@@ -28,6 +32,8 @@ export interface DeviceCardProps {
   onUpdateName: (device: Device, newName: string) => Promise<void>;
   onDelete: (device: Device) => Promise<void>;
   onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
+  onUpdateTiming: (device: Device, openDurationMs: number, closeDurationMs: number) => Promise<void>;
+  onUpdateServoAngles: (device: Device, openAngle: number, closeAngle: number) => Promise<void>;
 }
 
 export const DeviceCard: React.FC<DeviceCardProps> = ({
@@ -36,6 +42,8 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
   onUpdateName,
   onDelete,
   onSendCommand,
+  onUpdateTiming,
+  onUpdateServoAngles,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editedName, setEditedName] = useState(device.name);
@@ -44,6 +52,8 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
   const [isSavingName, setIsSavingName] = useState(false);
   const [confirmAction, setConfirmAction] = useState<CommandAction | null>(null);
   const [isSendingCommand, setIsSendingCommand] = useState(false);
+  const [showTimingModal, setShowTimingModal] = useState(false);
+  const [showAngleModal, setShowAngleModal] = useState(false);
 
   const online = isDeviceOnline(device);
   const reading = device.type === 'sensor' ? device.latestReading : null;
@@ -51,6 +61,8 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
   const isMoving = assignedGate?.reportedState === 'moving';
   const isOpen = assignedGate?.reportedState === 'open';
   const isClosed = assignedGate?.reportedState === 'closed';
+  const isMainGate = device.type === 'actuator' && device.deviceId.startsWith('DILIG-MAIN-');
+  const isSubGate = device.type === 'actuator' && device.deviceId.startsWith('DILIG-SUB-');
 
   const handleSaveName = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -210,6 +222,31 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
               <GateStatusBadge state={assignedGate.reportedState} size="sm" />
             </div>
           )}
+
+          {isMainGate && (
+            <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
+              <span className="text-slate-600 font-semibold flex items-center gap-1.5">
+                <TimerReset className="w-3.5 h-3.5 text-slate-500" />
+                Movement timing
+              </span>
+              <span className="text-charcoal font-bold tabular-nums">
+                Open {Math.round((device.openDurationMs ?? 45000) / 1000)}s · Close{' '}
+                {Math.round((device.closeDurationMs ?? 45000) / 1000)}s
+              </span>
+            </div>
+          )}
+
+          {isSubGate && (
+            <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
+              <span className="text-slate-600 font-semibold flex items-center gap-1.5">
+                <RotateCw className="w-3.5 h-3.5 text-slate-500" />
+                Servo angles
+              </span>
+              <span className="text-charcoal font-bold tabular-nums">
+                Open {device.servoOpenAngle ?? 110}° · Close {device.servoCloseAngle ?? 0}°
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -270,7 +307,31 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
       )}
 
       {/* Footer Actions */}
-      <div className="flex items-center justify-end gap-2 pt-2.5 border-t border-slate-100 mt-2">
+      <div className="flex flex-wrap items-center justify-end gap-2 pt-2.5 border-t border-slate-100 mt-2">
+        {isMainGate && (
+          <button
+            type="button"
+            onClick={() => setShowTimingModal(true)}
+            disabled={isMoving}
+            title={isMoving ? 'Timing cannot be changed while the gate is moving.' : undefined}
+            className="text-xs text-amber-700 hover:text-amber-800 flex items-center gap-1 px-2.5 py-1 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <TimerReset className="w-3.5 h-3.5" />
+            <span>Set Timing</span>
+          </button>
+        )}
+        {isSubGate && (
+          <button
+            type="button"
+            onClick={() => setShowAngleModal(true)}
+            disabled={isMoving}
+            title={isMoving ? 'Angles cannot be changed while the gate is moving.' : undefined}
+            className="text-xs text-amber-700 hover:text-amber-800 flex items-center gap-1 px-2.5 py-1 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RotateCw className="w-3.5 h-3.5" />
+            <span>Set Angles</span>
+          </button>
+        )}
         {!isEditing && (
           <button
             type="button"
@@ -313,6 +374,24 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
         variant={confirmAction === 'OPEN' ? 'primary' : 'secondary'}
         isLoading={isSendingCommand}
       />
+
+      {isMainGate && showTimingModal && (
+        <MainGateTimingModal
+          isOpen
+          device={device}
+          onClose={() => setShowTimingModal(false)}
+          onSave={onUpdateTiming}
+        />
+      )}
+
+      {isSubGate && showAngleModal && (
+        <SubGateAngleModal
+          isOpen
+          device={device}
+          onClose={() => setShowAngleModal(false)}
+          onSave={onUpdateServoAngles}
+        />
+      )}
     </Card>
   );
 };

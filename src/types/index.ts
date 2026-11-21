@@ -41,6 +41,12 @@ export interface Device {
   assignedGateId?: string | null;
   latestReading?: SoilReading | null;
   registryVersion?: number;
+  openDurationMs?: number;
+  closeDurationMs?: number;
+  timingUpdatedAt?: number | null;
+  servoOpenAngle?: number;
+  servoCloseAngle?: number;
+  servoConfigUpdatedAt?: number | null;
 }
 
 export interface Gate {

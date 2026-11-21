@@ -19,7 +19,11 @@ constexpr uint8_t BTS7960_PWM_RESOLUTION_BITS = 8;
 constexpr uint8_t BTS7960_PWM_DUTY = 220;  // 0-255; start below full power.
 constexpr uint32_t BTS7960_RAMP_MS = 500;
 // Timed travel is the only stop feedback in this two-wire configuration.
-constexpr uint32_t BTS7960_TRAVEL_MS = 45000;
+// Firestore may override the default independently for OPEN and CLOSE, but
+// firmware always rejects values outside this mechanical safety envelope.
+constexpr uint32_t BTS7960_DEFAULT_TRAVEL_MS = 45000;
+constexpr uint32_t BTS7960_MIN_TRAVEL_MS = 5000;
+constexpr uint32_t BTS7960_MAX_TRAVEL_MS = 60000;
 constexpr uint8_t OLED_SDA_PIN = 21;
 constexpr uint8_t OLED_SCL_PIN = 22;
 constexpr uint8_t OLED_I2C_ADDRESS = 0x3C;

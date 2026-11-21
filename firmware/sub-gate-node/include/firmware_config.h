@@ -9,10 +9,12 @@
 namespace config {
 
 // Servo uses a separate stable 5V supply; its GND must join ESP32 GND.
-constexpr uint8_t SERVO_PIN = 25;
+constexpr uint8_t SERVO_PIN = 18;
 constexpr uint8_t SERVO_CLOSED_ANGLE = 0;
-constexpr uint8_t SERVO_OPEN_ANGLE = 180;
-constexpr uint32_t SERVO_SETTLE_MS = 900;
+constexpr uint8_t SERVO_OPEN_ANGLE = 110;
+constexpr uint16_t SERVO_MIN_PULSE_US = 500;
+constexpr uint16_t SERVO_MAX_PULSE_US = 2500;
+constexpr uint32_t SERVO_STEP_INTERVAL_MS = 15;
 constexpr uint8_t OLED_SDA_PIN = 21;
 constexpr uint8_t OLED_SCL_PIN = 22;
 constexpr uint8_t OLED_I2C_ADDRESS = 0x3C;

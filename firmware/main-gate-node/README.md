@@ -24,9 +24,10 @@ Tie BTS7960 R_EN and L_EN HIGH as required by your module, and connect the
 ESP32, driver logic supply, and motor-supply grounds together. The motor must
 use its own correctly rated power supply.
 
-The default PWM duty is 220/255 with a 500 ms soft-start ramp. The motor stops
-after 45 seconds for either direction. Change BTS7960_TRAVEL_MS in
-include/firmware_config.h if the measured travel time changes.
+The default PWM duty is 220/255 with a 500 ms soft-start ramp. Opening and
+closing both default to 45 seconds. After registration, use **Set Timing** on
+the device card to configure each direction independently from 5 to 60
+seconds. The firmware rejects unsafe cloud values and falls back to 45 seconds.
 
 This two-wire setup has no physical limit-switch feedback. The reported Open
 or Closed state means the configured timed movement completed. Add hardware
