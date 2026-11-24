@@ -97,10 +97,30 @@ service cloud.firestore {
       return val is number && val >= -40 && val <= 85;
     }
 
+    function isAutomaticControl(data) {
+      return data.controlMode == 'automatic' ||
+        (!data.keys().hasAny(['controlMode']) &&
+          data.automationConfig is map &&
+          data.automationConfig.enabled == true);
+    }
+
+    function isManualControl(data) {
+      return data.controlMode == 'manual' ||
+        (!data.keys().hasAny(['controlMode']) &&
+          !(data.automationConfig is map && data.automationConfig.enabled == true));
+    }
+
     function registryMatchesSensor(userId, deviceDocId, hardwareId) {
       let registry = get(/databases/$(database)/documents/deviceRegistry/$(hardwareId));
       return registry.data.userId == userId &&
         registry.data.deviceDocId == deviceDocId &&
+        registry.data.deviceId == hardwareId &&
+        registry.data.type == 'sensor';
+    }
+
+    function registryMatchesSensorUser(userId, hardwareId) {
+      let registry = get(/databases/$(database)/documents/deviceRegistry/$(hardwareId));
+      return registry.data.userId == userId &&
         registry.data.deviceId == hardwareId &&
         registry.data.type == 'sensor';
     }
@@ -150,6 +170,12 @@ service cloud.firestore {
         request.resource.data.latestReading is map &&
         isValidTelemetryReading(request.resource.data.latestReading, resource.data.deviceId) &&
         request.resource.data.latestReading.recordedAt == request.resource.data.lastSeenAt &&
+        registryMatchesSensor(userId, deviceDocId, resource.data.deviceId);
+    }
+
+    function isRegisteredSensorDeviceRead(userId, deviceDocId) {
+      return request.auth == null &&
+        resource.data.type == 'sensor' &&
         registryMatchesSensor(userId, deviceDocId, resource.data.deviceId);
     }
 
@@ -210,9 +236,11 @@ service cloud.firestore {
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'reportedState',
           'pendingCommandId',
+          'activeCommandSource',
           'updatedAt'
         ]) &&
         request.resource.data.pendingCommandId == null &&
+        request.resource.data.activeCommandSource == null &&
         request.resource.data.updatedAt is number &&
         command.data.gateId == gateId &&
         command.data.actuatorDeviceId == resource.data.actuatorDeviceId &&
@@ -221,6 +249,79 @@ service cloud.firestore {
           ((command.data.command == 'OPEN' && request.resource.data.reportedState == 'open') ||
            (command.data.command == 'CLOSE' && request.resource.data.reportedState == 'closed'))) ||
          (command.data.status == 'failed' && request.resource.data.reportedState == 'error')) &&
+        registryMatchesActuatorUser(userId, resource.data.actuatorDeviceId);
+    }
+
+    function isValidAutomationConfig(data, sensorDeviceId) {
+      return data is map &&
+        data.keys().hasOnly([
+          'enabled',
+          'sensorDeviceId',
+          'temperatureThresholdC',
+          'moistureThresholdPercent',
+          'temperatureHysteresisC',
+          'moistureHysteresisPercent',
+          'updatedAt'
+        ]) &&
+        data.enabled == true &&
+        data.sensorDeviceId == sensorDeviceId &&
+        isValidTemperature(data.temperatureThresholdC) &&
+        isValidMoisture(data.moistureThresholdPercent) &&
+        data.temperatureHysteresisC == 2 &&
+        data.moistureHysteresisPercent == 5 &&
+        data.updatedAt is number;
+    }
+
+    function isRegisteredSensorAutomationReading(userId) {
+      return request.auth == null &&
+        isAutomaticControl(resource.data) &&
+        resource.data.sensorDeviceId is string &&
+        isValidAutomationConfig(resource.data.automationConfig, resource.data.sensorDeviceId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['automationReading']) &&
+        request.resource.data.automationReading is map &&
+        isValidTelemetryReading(request.resource.data.automationReading, resource.data.sensorDeviceId) &&
+        registryMatchesSensorUser(userId, resource.data.sensorDeviceId);
+    }
+
+    function isAutomaticDirectionValid(gate, command) {
+      let config = gate.automationConfig;
+      let reading = gate.automationReading;
+      return isAutomaticControl(gate) &&
+        isValidAutomationConfig(config, gate.sensorDeviceId) &&
+        reading is map &&
+        isValidTelemetryReading(reading, gate.sensorDeviceId) &&
+        reading.soilTemperatureC != null &&
+        reading.recordedAt >= request.time.toMillis() - 90000 &&
+        reading.recordedAt <= request.time.toMillis() + 30000 &&
+        command.triggerReadingAt == reading.recordedAt &&
+        ((command.command == 'CLOSE' &&
+          (reading.soilTemperatureC < config.temperatureThresholdC ||
+           reading.soilMoisturePercent < config.moistureThresholdPercent)) ||
+         (command.command == 'OPEN' &&
+          reading.soilTemperatureC >= config.temperatureThresholdC + config.temperatureHysteresisC &&
+          reading.soilMoisturePercent >= config.moistureThresholdPercent + config.moistureHysteresisPercent));
+    }
+
+    function isRegisteredActuatorAutomaticReservation(userId, gateId) {
+      let commandId = request.resource.data.pendingCommandId;
+      let command = getAfter(/databases/$(database)/documents/users/$(userId)/gates/$(gateId)/commands/$(commandId));
+      return request.auth == null &&
+        resource.data.actuatorDeviceId is string &&
+        resource.data.pendingCommandId == null &&
+        resource.data.reportedState != 'moving' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'reportedState',
+          'pendingCommandId',
+          'activeCommandSource',
+          'updatedAt'
+        ]) &&
+        request.resource.data.reportedState == 'moving' &&
+        request.resource.data.pendingCommandId is string &&
+        request.resource.data.activeCommandSource == 'automatic' &&
+        request.resource.data.updatedAt is number &&
+        command.data.source == 'automatic' &&
+        command.data.actuatorDeviceId == resource.data.actuatorDeviceId &&
+        isAutomaticDirectionValid(resource.data, command.data) &&
         registryMatchesActuatorUser(userId, resource.data.actuatorDeviceId);
     }
 
@@ -269,7 +370,9 @@ service cloud.firestore {
           'status',
           'requestedAt',
           'completedAt',
-          'errorMessage'
+          'errorMessage',
+          'source',
+          'triggerReadingAt'
         ]) &&
         request.resource.data.gateId == gateId &&
         request.resource.data.actuatorDeviceId == gateAfter.data.actuatorDeviceId &&
@@ -278,8 +381,46 @@ service cloud.firestore {
         request.resource.data.requestedAt is number &&
         request.resource.data.completedAt == null &&
         request.resource.data.errorMessage == null &&
+        request.resource.data.source == 'manual' &&
+        request.resource.data.triggerReadingAt == null &&
+        isManualControl(gateAfter.data) &&
         gateAfter.data.pendingCommandId == commandId &&
-        gateAfter.data.reportedState == 'moving';
+        gateAfter.data.reportedState == 'moving' &&
+        gateAfter.data.activeCommandSource == 'manual';
+    }
+
+    function isValidAutomaticCommandCreate(userId, gateId, commandId) {
+      let gate = get(/databases/$(database)/documents/users/$(userId)/gates/$(gateId));
+      let gateAfter = getAfter(/databases/$(database)/documents/users/$(userId)/gates/$(gateId));
+      return request.auth == null &&
+        request.resource.data.keys().hasOnly([
+          'gateId',
+          'actuatorDeviceId',
+          'command',
+          'status',
+          'requestedAt',
+          'completedAt',
+          'errorMessage',
+          'source',
+          'triggerReadingAt'
+        ]) &&
+        request.resource.data.gateId == gateId &&
+        request.resource.data.actuatorDeviceId == gate.data.actuatorDeviceId &&
+        request.resource.data.command in ['OPEN', 'CLOSE'] &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.requestedAt is number &&
+        request.resource.data.completedAt == null &&
+        request.resource.data.errorMessage == null &&
+        request.resource.data.source == 'automatic' &&
+        request.resource.data.triggerReadingAt is number &&
+        gate.data.pendingCommandId == null &&
+        gate.data.reportedState != 'moving' &&
+        isAutomaticControl(gate.data) &&
+        gateAfter.data.pendingCommandId == commandId &&
+        gateAfter.data.reportedState == 'moving' &&
+        gateAfter.data.activeCommandSource == 'automatic' &&
+        isAutomaticDirectionValid(gate.data, request.resource.data) &&
+        registryMatchesActuatorUser(userId, request.resource.data.actuatorDeviceId);
     }
 
     // User profile document
@@ -288,7 +429,9 @@ service cloud.firestore {
 
       // Registered Devices subcollection
       match /devices/{deviceDocId} {
-        allow get: if isOwner(userId) || isRegisteredActuatorDeviceRead(userId, deviceDocId);
+        allow get: if isOwner(userId) ||
+          isRegisteredActuatorDeviceRead(userId, deviceDocId) ||
+          isRegisteredSensorDeviceRead(userId, deviceDocId);
         allow list: if isOwner(userId);
         allow create: if isValidOwnerDeviceCreate(userId);
         allow delete: if isOwner(userId);
@@ -312,17 +455,27 @@ service cloud.firestore {
         allow create, delete: if isOwner(userId);
         allow update: if isOwner(userId) ||
           isRegisteredActuatorPositionUpdate(userId) ||
-          isRegisteredActuatorCompletion(userId, gateId);
+          isRegisteredActuatorCompletion(userId, gateId) ||
+          isRegisteredSensorAutomationReading(userId) ||
+          isRegisteredActuatorAutomaticReservation(userId, gateId);
 
         // Gate Commands subcollection
         match /commands/{commandId} {
           allow get: if isOwner(userId) || isRegisteredActuatorCommandRead(userId, gateId);
           allow list: if isOwner(userId);
-          allow create: if isValidOwnerCommandCreate(userId, gateId, commandId);
+          allow create: if isValidOwnerCommandCreate(userId, gateId, commandId) ||
+            isValidAutomaticCommandCreate(userId, gateId, commandId);
           allow update: if isOwner(userId) ||
             isValidActuatorCommandTransition(userId, gateId, commandId);
           allow delete: if isOwner(userId);
         }
+      }
+
+
+      // User-owned visual field quadrants. Hardware never reads or writes
+      // this collection; it is presentation metadata for the web app only.
+      match /quadrants/{quadrantId} {
+        allow read, create, update, delete: if isOwner(userId);
       }
     }
 

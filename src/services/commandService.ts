@@ -22,6 +22,10 @@ export const sendGateCommand = async (
     throw new Error('This gate does not have an assigned actuator device.');
   }
 
+  if (gate.controlMode !== 'manual') {
+    throw new Error('Switch this gate to Manual mode before sending Open or Close commands.');
+  }
+
   if (actuatorDevice.type !== 'actuator') {
     throw new Error('Assigned device is not a valid gate actuator.');
   }
@@ -53,6 +57,13 @@ export const sendGateCommand = async (
     if (currentGate.reportedState === 'moving' || currentGate.pendingCommandId) {
       throw new Error('A gate movement is already in progress. Please wait for it to complete.');
     }
+    const currentMode = currentGate.controlMode === 'automatic' ||
+      (!currentGate.controlMode && currentGate.automationConfig?.enabled)
+      ? 'automatic'
+      : 'manual';
+    if (currentMode !== 'manual') {
+      throw new Error('This gate is in Automatic mode. Switch to Manual before controlling it.');
+    }
     if (currentGate.actuatorDeviceId !== gate.actuatorDeviceId) {
       throw new Error('The gate actuator assignment changed. Refresh and try again.');
     }
@@ -65,10 +76,13 @@ export const sendGateCommand = async (
       requestedAt: now,
       completedAt: null,
       errorMessage: null,
+      source: 'manual',
+      triggerReadingAt: null,
     });
     transaction.update(gateRef, {
       reportedState: 'moving',
       pendingCommandId: commandId,
+      activeCommandSource: 'manual',
       updatedAt: now,
     });
   });
@@ -99,6 +113,7 @@ export const sendGateCommand = async (
           transaction.update(gateRef, {
             reportedState: 'error',
             pendingCommandId: null,
+            activeCommandSource: null,
             updatedAt: completedAt,
           });
         }

@@ -53,6 +53,8 @@ struct CloudResult {
 struct DeviceBinding {
   char userId[USER_ID_CAPACITY];
   char deviceDocId[DOCUMENT_ID_CAPACITY];
+  char automationGateIds[16][DOCUMENT_ID_CAPACITY];
+  uint8_t automationGateCount;
   bool resolved;
 };
 
@@ -272,14 +274,125 @@ bool resolveDeviceBinding(DeviceBinding& binding, int& httpCode) {
   if (validBinding) {
     strlcpy(binding.userId, userId, sizeof(binding.userId));
     strlcpy(binding.deviceDocId, deviceDocId, sizeof(binding.deviceDocId));
-    binding.resolved = true;
   }
 
   http.end();
   if (!validBinding) {
     httpCode = -5;
+    return false;
   }
-  return validBinding;
+
+  binding.automationGateCount = 0;
+  const int configUrlLength = snprintf(
+      url,
+      sizeof(url),
+      "https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents/"
+      "users/%s/devices/%s?key=%s",
+      DILIG_FIREBASE_PROJECT_ID,
+      binding.userId,
+      binding.deviceDocId,
+      DILIG_FIREBASE_API_KEY);
+  if (configUrlLength <= 0 || static_cast<size_t>(configUrlLength) >= sizeof(url) ||
+      !http.begin(client, url)) {
+    httpCode = -2;
+    return false;
+  }
+  httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    http.end();
+    return false;
+  }
+
+  JsonDocument deviceDocument;
+  const String deviceResponse = http.getString();
+  const DeserializationError deviceJsonError = deserializeJson(deviceDocument, deviceResponse);
+  http.end();
+  if (deviceJsonError) {
+    Serial.printf("[cloud] sensor config JSON error: %s\n", deviceJsonError.c_str());
+    httpCode = -4;
+    return false;
+  }
+
+  JsonArray gateValues =
+      deviceDocument["fields"]["automationConfig"]["mapValue"]["fields"]["gateIds"]
+          ["arrayValue"]["values"]
+              .as<JsonArray>();
+  for (JsonVariant gateValue : gateValues) {
+    if (binding.automationGateCount >= 16) break;
+    const char* gateId = gateValue["stringValue"] | "";
+    if (strlen(gateId) == 0 || strlen(gateId) >= DOCUMENT_ID_CAPACITY) continue;
+    strlcpy(
+        binding.automationGateIds[binding.automationGateCount],
+        gateId,
+        DOCUMENT_ID_CAPACITY);
+    binding.automationGateCount++;
+  }
+  binding.resolved = true;
+  return true;
+}
+
+bool commitAutomationReading(
+    const TelemetrySample& sample,
+    const DeviceBinding& binding,
+    const char* gateId,
+    const int64_t timestampMs,
+    int& httpCode) {
+  char temperatureValue[48] = {};
+  if (sample.temperatureAvailable) {
+    snprintf(
+        temperatureValue,
+        sizeof(temperatureValue),
+        "\"doubleValue\":%.2f",
+        static_cast<double>(sample.soilTemperatureC));
+  } else {
+    strlcpy(temperatureValue, "\"nullValue\":null", sizeof(temperatureValue));
+  }
+
+  char url[640] = {};
+  const int urlLength = snprintf(
+      url,
+      sizeof(url),
+      "https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents/"
+      "users/%s/gates/%s?updateMask.fieldPaths=automationReading&key=%s",
+      DILIG_FIREBASE_PROJECT_ID,
+      binding.userId,
+      gateId,
+      DILIG_FIREBASE_API_KEY);
+  char payload[768] = {};
+  const int payloadLength = snprintf(
+      payload,
+      sizeof(payload),
+      "{\"fields\":{\"automationReading\":{\"mapValue\":{\"fields\":{"
+      "\"deviceId\":{\"stringValue\":\"%s\"},"
+      "\"soilTemperatureC\":{%s},"
+      "\"soilMoisturePercent\":{\"doubleValue\":%.2f},"
+      "\"recordedAt\":{\"integerValue\":\"%lld\"}}}}}}",
+      sample.deviceId,
+      temperatureValue,
+      static_cast<double>(sample.soilMoisturePercent),
+      static_cast<long long>(timestampMs));
+  if (urlLength <= 0 || static_cast<size_t>(urlLength) >= sizeof(url) ||
+      payloadLength <= 0 || static_cast<size_t>(payloadLength) >= sizeof(payload)) {
+    httpCode = -1;
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setCACert(GOOGLE_TRUST_SERVICES_ROOT_R4);
+  HTTPClient http;
+  http.setConnectTimeout(config::HTTP_TIMEOUT_MS);
+  http.setTimeout(config::HTTP_TIMEOUT_MS);
+  if (!http.begin(client, url)) {
+    httpCode = -2;
+    return false;
+  }
+  http.addHeader(F("Content-Type"), F("application/json"));
+  httpCode = http.sendRequest(
+      "PATCH",
+      reinterpret_cast<uint8_t*>(payload),
+      static_cast<size_t>(payloadLength));
+  http.end();
+  return httpCode >= 200 && httpCode < 300;
 }
 
 bool commitTelemetry(
@@ -371,8 +484,25 @@ bool commitTelemetry(
   http.addHeader(F("Content-Type"), F("application/json"));
   httpCode = http.POST(reinterpret_cast<uint8_t*>(payload), payloadLength);
   http.end();
+  if (httpCode < 200 || httpCode >= 300) return false;
 
-  return httpCode >= 200 && httpCode < 300;
+  for (uint8_t i = 0; i < binding.automationGateCount; ++i) {
+    esp_task_wdt_reset();
+    int gateHttpCode = 0;
+    if (!commitAutomationReading(
+            sample,
+            binding,
+            binding.automationGateIds[i],
+            timestampMs,
+            gateHttpCode)) {
+      Serial.printf(
+          "[auto] gate telemetry failed: gate=%s, HTTP %d\n",
+          binding.automationGateIds[i],
+          gateHttpCode);
+    }
+  }
+
+  return true;
 }
 
 void sensorTask(void*) {
@@ -556,6 +686,9 @@ void cloudTask(void*) {
             httpCode);
         publishCloudResult(CloudState::Sent, httpCode);
         hasPendingSample = false;
+        // Re-read the owner-managed automation gate list before the next
+        // telemetry cycle so web changes apply without reflashing or rebooting.
+        binding.resolved = false;
       } else if (httpCode == HTTP_CODE_NOT_FOUND || httpCode == HTTP_CODE_FORBIDDEN) {
         binding.resolved = false;
         Serial.printf("[cloud] registration rejected, HTTP %d; resolving again\n", httpCode);

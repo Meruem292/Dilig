@@ -1,7 +1,7 @@
 import React from 'react';
-import { Home, Sliders, Cpu } from 'lucide-react';
+import { Home, Sliders, Cpu, Map } from 'lucide-react';
 
-export type NavTab = 'home' | 'gates' | 'devices';
+export type NavTab = 'home' | 'quadrants' | 'gates' | 'devices';
 
 export interface BottomNavProps {
   currentTab: NavTab;
@@ -21,6 +21,11 @@ export const BottomNav: React.FC<BottomNavProps> = ({
       id: 'home' as NavTab,
       label: 'Home',
       icon: Home,
+    },
+    {
+      id: 'quadrants' as NavTab,
+      label: 'Map',
+      icon: Map,
     },
     {
       id: 'gates' as NavTab,

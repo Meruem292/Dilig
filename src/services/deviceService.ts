@@ -11,7 +11,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
-import type { Device, DeviceType } from '../types';
+import type { Device, DeviceType, Gate } from '../types';
 
 const HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const DEVICE_ID_PATTERN = /^[A-Z0-9][A-Z0-9_-]{2,63}$/;
@@ -55,6 +55,8 @@ export const subscribeToUserDevices = (
           servoOpenAngle: typeof data.servoOpenAngle === 'number' ? data.servoOpenAngle : undefined,
           servoCloseAngle: typeof data.servoCloseAngle === 'number' ? data.servoCloseAngle : undefined,
           servoConfigUpdatedAt: data.servoConfigUpdatedAt?.toMillis?.() ?? null,
+          automationConfig: data.automationConfig || null,
+          quadrantPlacement: data.quadrantPlacement || null,
         };
       });
       onUpdate(devices);
@@ -64,6 +66,70 @@ export const subscribeToUserDevices = (
       onError?.(error);
     }
   );
+};
+
+export const updateSensorAutomation = async (
+  userId: string,
+  sensor: Device,
+  linkedGates: Gate[],
+  temperatureThresholdC: number,
+  moistureThresholdPercent: number,
+  selectedGateIds: string[]
+): Promise<void> => {
+  if (!db) throw new Error('Firestore is not initialized.');
+  if (sensor.type !== 'sensor') throw new Error('Automatic control can only be configured on a sensor.');
+  if (!Number.isFinite(temperatureThresholdC) || temperatureThresholdC < -20 || temperatureThresholdC > 60) {
+    throw new Error('Temperature threshold must be between -20°C and 60°C.');
+  }
+  if (!Number.isFinite(moistureThresholdPercent) || moistureThresholdPercent < 0 || moistureThresholdPercent > 100) {
+    throw new Error('Moisture threshold must be between 0% and 100%.');
+  }
+
+  const eligibleIds = new Set(
+    linkedGates
+      .filter((gate) => gate.sensorDeviceId === sensor.deviceId && Boolean(gate.actuatorDeviceId))
+      .map((gate) => gate.id)
+  );
+  const uniqueSelectedIds = [...new Set(selectedGateIds)];
+  if (uniqueSelectedIds.some((gateId) => !eligibleIds.has(gateId))) {
+    throw new Error('One or more selected gates are no longer linked to this sensor and an actuator.');
+  }
+  if (uniqueSelectedIds.length > 16) {
+    throw new Error('A sensor can automatically control up to 16 gates.');
+  }
+
+  const now = Date.now();
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'users', userId, 'devices', sensor.id), {
+    automationConfig: {
+      temperatureThresholdC,
+      moistureThresholdPercent,
+      gateIds: uniqueSelectedIds,
+      updatedAt: now,
+    },
+  });
+
+  const selected = new Set(uniqueSelectedIds);
+  for (const gate of linkedGates.filter((candidate) => candidate.sensorDeviceId === sensor.deviceId)) {
+    batch.update(doc(db, 'users', userId, 'gates', gate.id), {
+      automationConfig: selected.has(gate.id)
+        ? {
+            enabled: true,
+            sensorDeviceId: sensor.deviceId,
+            temperatureThresholdC,
+            moistureThresholdPercent,
+            temperatureHysteresisC: 2,
+            moistureHysteresisPercent: 5,
+            updatedAt: now,
+          }
+        : null,
+      controlMode: selected.has(gate.id) ? 'automatic' : 'manual',
+      automationReading: null,
+      updatedAt: now,
+    });
+  }
+
+  await batch.commit();
 };
 
 /**
@@ -236,9 +302,26 @@ export const updateSubGateAngles = async (
 
 export const deleteDevice = async (
   userId: string,
-  device: Device
+  device: Device,
+  gates: Gate[] = []
 ): Promise<void> => {
   if (!db) throw new Error('Firestore is not initialized.');
+
+  const automationGates = gates.filter(
+    (gate) => gate.sensorDeviceId === device.deviceId && gate.automationConfig?.enabled
+  );
+  if (automationGates.length > 0) {
+    const batch = writeBatch(db);
+    for (const gate of automationGates) {
+      batch.update(doc(db, 'users', userId, 'gates', gate.id), {
+        controlMode: 'manual',
+        automationConfig: null,
+        automationReading: null,
+        updatedAt: Date.now(),
+      });
+    }
+    await batch.commit();
+  }
 
   // If this device was assigned to a gate, unlink it first
   if (device.assignedGateId) {

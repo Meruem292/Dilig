@@ -63,6 +63,11 @@ export const isReadingStale = (recordedAt: number | null | undefined): boolean =
   return Date.now() - recordedAt > STALE_THRESHOLD_MS;
 };
 
+export const isAutomationReadingStale = (recordedAt: number | null | undefined): boolean => {
+  if (!recordedAt) return true;
+  return Date.now() - recordedAt > 90_000;
+};
+
 export const formatTimeAgo = (epochMs: number | null | undefined): string => {
   if (!epochMs) return 'Never';
   const diffSec = Math.floor((Date.now() - epochMs) / 1000);

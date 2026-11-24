@@ -3,15 +3,18 @@ import { Card } from '../common/Card';
 import { Button } from '../common/Button';
 import { GateStatusBadge } from './GateStatusBadge';
 import { ConfirmDialog } from '../common/ConfirmDialog';
-import { Sliders, Cpu, MapPin, Edit3, Trash2, ArrowUpRight, ArrowDownLeft, AlertTriangle } from 'lucide-react';
-import type { Gate, Device, CommandAction } from '../../types';
+import { Sliders, Cpu, MapPin, Edit3, Trash2, ArrowUpRight, ArrowDownLeft, AlertTriangle, Bot } from 'lucide-react';
+import type { Gate, Device, CommandAction, GateControlMode } from '../../types';
 import { isDeviceOnline } from '../../services/deviceService';
+import { isAutomationReadingStale } from '../../services/telemetryService';
 
 export interface GateCardProps {
   gate: Gate;
   actuatorDevice?: Device | null;
   sensorDevice?: Device | null;
   onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
+  onSetControlMode: (gate: Gate, mode: GateControlMode) => Promise<void>;
+  onConfigureAutomation: (gate: Gate) => void;
   onEdit?: (gate: Gate) => void;
   onDelete?: (gate: Gate) => void;
   compact?: boolean;
@@ -22,18 +25,39 @@ export const GateCard: React.FC<GateCardProps> = ({
   actuatorDevice,
   sensorDevice,
   onSendCommand,
+  onSetControlMode,
+  onConfigureAutomation,
   onEdit,
   onDelete,
   compact = false,
 }) => {
   const [confirmAction, setConfirmAction] = useState<CommandAction | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isChangingMode, setIsChangingMode] = useState(false);
 
   const hasActuator = Boolean(gate.actuatorDeviceId && actuatorDevice);
   const actuatorOnline = actuatorDevice ? isDeviceOnline(actuatorDevice) : false;
   const isMoving = gate.reportedState === 'moving';
   const isOpen = gate.reportedState === 'open';
   const isClosed = gate.reportedState === 'closed';
+  const isAutomatic = gate.controlMode === 'automatic';
+  const automationEnabled = gate.automationConfig?.enabled === true;
+  const automationReadingFresh = Boolean(
+    gate.automationReading && !isAutomationReadingStale(gate.automationReading.recordedAt)
+  );
+  const automationLabel = (() => {
+    if (!automationEnabled) return null;
+    if (gate.activeCommandSource === 'manual' && isMoving) return 'Manual priority';
+    if (!automationReadingFresh || gate.automationReading?.soilTemperatureC == null) return 'Paused — stale data';
+    if (gate.activeCommandSource === 'automatic' && isMoving) {
+      const reading = gate.automationReading!;
+      const config = gate.automationConfig!;
+      const low = reading.soilTemperatureC! < config.temperatureThresholdC ||
+        reading.soilMoisturePercent < config.moistureThresholdPercent;
+      return low ? 'Automatically closing' : 'Automatically opening';
+    }
+    return 'Automatic';
+  })();
 
   const handleConfirm = async () => {
     if (!confirmAction) return;
@@ -43,6 +67,16 @@ export const GateCard: React.FC<GateCardProps> = ({
       setConfirmAction(null);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleModeChange = async (mode: GateControlMode) => {
+    if (mode === gate.controlMode) return;
+    setIsChangingMode(true);
+    try {
+      await onSetControlMode(gate, mode);
+    } finally {
+      setIsChangingMode(false);
     }
   };
 
@@ -68,6 +102,47 @@ export const GateCard: React.FC<GateCardProps> = ({
             <GateStatusBadge state={gate.reportedState} />
           </div>
         </div>
+
+        {!compact && (
+          <div className="my-3 flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-2.5">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wide text-charcoal">Control mode</p>
+              <p className="mt-0.5 text-[11px] text-charcoal-muted">
+                {isAutomatic ? 'Linked sensor controls this gate.' : 'Open and close this gate manually.'}
+              </p>
+            </div>
+            <div className="inline-flex rounded-xl bg-slate-100 p-1" role="group" aria-label={`Control mode for ${gate.name}`}>
+              {(['manual', 'automatic'] as GateControlMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => void handleModeChange(mode)}
+                  disabled={isChangingMode || isMoving || !hasActuator || (mode === 'automatic' && !sensorDevice)}
+                  aria-pressed={gate.controlMode === mode}
+                  className={`min-h-9 rounded-lg px-3 text-xs font-bold capitalize transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    gate.controlMode === mode
+                      ? mode === 'automatic'
+                        ? 'bg-nature-700 text-white shadow-subtle'
+                        : 'bg-white text-charcoal shadow-subtle'
+                      : 'text-slate-500 hover:text-charcoal'
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+            {isAutomatic && (
+              <button
+                type="button"
+                onClick={() => onConfigureAutomation(gate)}
+                disabled={isMoving}
+                className="text-xs font-semibold text-nature-700 hover:text-nature-800 disabled:opacity-50"
+              >
+                Edit thresholds
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Description if present and not compact */}
         {!compact && gate.description && (
@@ -111,6 +186,20 @@ export const GateCard: React.FC<GateCardProps> = ({
               </span>
             </div>
           )}
+
+          {!compact && automationLabel && (
+            <div className={`flex items-center justify-between p-2 rounded-xl border ${
+              automationReadingFresh ? 'bg-water-50/60 border-water-100' : 'bg-amber-50 border-amber-200'
+            }`}>
+              <span className="flex items-center gap-1.5 font-semibold text-charcoal">
+                <Bot className="w-3.5 h-3.5 text-water-700" />
+                Automatic control
+              </span>
+              <span className={`font-semibold ${automationReadingFresh ? 'text-water-800' : 'text-amber-800'}`}>
+                {automationLabel}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Hardware Status Warnings */}
@@ -143,7 +232,9 @@ export const GateCard: React.FC<GateCardProps> = ({
             Manual Gate Control
           </p>
           <p className="text-[11px] text-charcoal-muted mt-0.5">
-            Send an Open or Close command directly to the assigned controller.
+            {isAutomatic
+              ? 'Switch to Manual mode before sending a direct command.'
+              : 'Send an Open or Close command directly to the assigned controller.'}
           </p>
         </div>
         <div className="grid grid-cols-2 gap-2.5">
@@ -153,7 +244,7 @@ export const GateCard: React.FC<GateCardProps> = ({
             size="md"
             leftIcon={<ArrowUpRight className="w-4 h-4" />}
             onClick={() => setConfirmAction('OPEN')}
-            disabled={!hasActuator || !actuatorOnline || isMoving || isOpen}
+            disabled={!hasActuator || !actuatorOnline || isMoving || isOpen || isAutomatic}
             className="w-full"
           >
             {isOpen ? 'Gate Open' : 'Manual Open'}
@@ -165,7 +256,7 @@ export const GateCard: React.FC<GateCardProps> = ({
             size="md"
             leftIcon={<ArrowDownLeft className="w-4 h-4" />}
             onClick={() => setConfirmAction('CLOSE')}
-            disabled={!hasActuator || !actuatorOnline || isMoving || isClosed}
+            disabled={!hasActuator || !actuatorOnline || isMoving || isClosed || isAutomatic}
             className="w-full"
           >
             {isClosed ? 'Gate Closed' : 'Manual Close'}

@@ -58,6 +58,7 @@ struct UiStatus {
   bool registered;
   bool assigned;
   char gateName[GATE_NAME_CAPACITY];
+  char automationLabel[20];
 };
 
 struct DeviceBinding {
@@ -78,7 +79,18 @@ struct DeviceBinding {
 struct GateSnapshot {
   char name[GATE_NAME_CAPACITY];
   char pendingCommandId[FIRESTORE_ID_CAPACITY];
+  char updateTime[40];
   PhysicalState reportedState;
+  bool automationEnabled;
+  bool automationTemperatureAvailable;
+  float automationTemperatureC;
+  float automationMoisturePercent;
+  float temperatureThresholdC;
+  float moistureThresholdPercent;
+  float temperatureHysteresisC;
+  float moistureHysteresisPercent;
+  int64_t automationRecordedAt;
+  bool activeCommandAutomatic;
 };
 
 struct CommandSnapshot {
@@ -177,6 +189,19 @@ const char* firestoreState(const PhysicalState state) {
     default:
       return "unknown";
   }
+}
+
+float firestoreNumber(JsonVariant field, const float fallback) {
+  if (!field["doubleValue"].isNull()) {
+    return field["doubleValue"].as<float>();
+  }
+  const char* integerValue = field["integerValue"] | "";
+  return strlen(integerValue) > 0 ? strtof(integerValue, nullptr) : fallback;
+}
+
+bool firestoreNumberAvailable(JsonVariant field) {
+  const char* integerValue = field["integerValue"] | "";
+  return !field["doubleValue"].isNull() || strlen(integerValue) > 0;
 }
 
 void buildDeviceId() {
@@ -286,7 +311,7 @@ void renderDisplay(
   } else if (moving) {
     g_display.println(activeAction == CommandAction::Open ? F("OPENING") : F("CLOSING"));
   } else {
-    g_display.println(F("READY"));
+    g_display.println(ui.automationLabel[0] != '\0' ? ui.automationLabel : "READY");
   }
   g_display.display();
 }
@@ -489,13 +514,110 @@ bool fetchGate(const DeviceBinding& binding, GateSnapshot& gate, int& httpCode) 
     return false;
   }
   strlcpy(gate.name, document["fields"]["name"]["stringValue"] | "Gate", sizeof(gate.name));
+  strlcpy(gate.updateTime, document["updateTime"] | "", sizeof(gate.updateTime));
   strlcpy(
       gate.pendingCommandId,
       document["fields"]["pendingCommandId"]["stringValue"] | "",
       sizeof(gate.pendingCommandId));
   gate.reportedState = parsePhysicalState(
       document["fields"]["reportedState"]["stringValue"] | "unknown");
+  gate.activeCommandAutomatic = strcmp(
+      document["fields"]["activeCommandSource"]["stringValue"] | "",
+      "automatic") == 0;
+  JsonVariant configFields =
+      document["fields"]["automationConfig"]["mapValue"]["fields"];
+  JsonVariant readingFields =
+      document["fields"]["automationReading"]["mapValue"]["fields"];
+  const char* automationSensorId = configFields["sensorDeviceId"]["stringValue"] | "";
+  const char* readingSensorId = readingFields["deviceId"]["stringValue"] | "";
+  const char* controlMode = document["fields"]["controlMode"]["stringValue"] | "";
+  const bool automaticMode = strcmp(controlMode, "automatic") == 0 ||
+                             (strlen(controlMode) == 0 &&
+                              (configFields["enabled"]["booleanValue"] | false));
+  gate.automationEnabled = automaticMode &&
+                           (configFields["enabled"]["booleanValue"] | false) &&
+                           strlen(automationSensorId) > 0;
+  gate.temperatureThresholdC =
+      firestoreNumber(configFields["temperatureThresholdC"], 20.0F);
+  gate.moistureThresholdPercent =
+      firestoreNumber(configFields["moistureThresholdPercent"], 30.0F);
+  gate.temperatureHysteresisC =
+      firestoreNumber(configFields["temperatureHysteresisC"], 2.0F);
+  gate.moistureHysteresisPercent =
+      firestoreNumber(configFields["moistureHysteresisPercent"], 5.0F);
+  gate.automationTemperatureAvailable =
+      strcmp(automationSensorId, readingSensorId) == 0 &&
+      firestoreNumberAvailable(readingFields["soilTemperatureC"]);
+  gate.automationTemperatureC =
+      firestoreNumber(readingFields["soilTemperatureC"], 0.0F);
+  gate.automationMoisturePercent =
+      firestoreNumber(readingFields["soilMoisturePercent"], -1.0F);
+  const char* recordedAt = readingFields["recordedAt"]["integerValue"] | "";
+  gate.automationRecordedAt = strlen(recordedAt) > 0 ? strtoll(recordedAt, nullptr, 10) : 0;
   return true;
+}
+
+bool createAutomaticCommand(
+    const DeviceBinding& binding,
+    const GateSnapshot& gate,
+    const CommandAction action,
+    char* commandId,
+    const size_t commandIdCapacity,
+    int& httpCode) {
+  const int64_t now = epochMs();
+  snprintf(
+      commandId,
+      commandIdCapacity,
+      "auto-%08lX-%08lX",
+      static_cast<unsigned long>(millis()),
+      static_cast<unsigned long>(now & 0xFFFFFFFFULL));
+  char url[384] = {};
+  snprintf(
+      url,
+      sizeof(url),
+      "https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents:commit?key=%s",
+      DILIG_FIREBASE_PROJECT_ID,
+      DILIG_FIREBASE_API_KEY);
+  char payload[3200] = {};
+  const int length = snprintf(
+      payload,
+      sizeof(payload),
+      "{\"writes\":["
+      "{\"update\":{\"name\":\"projects/%s/databases/(default)/documents/users/%s/gates/%s/commands/%s\","
+      "\"fields\":{\"gateId\":{\"stringValue\":\"%s\"},"
+      "\"actuatorDeviceId\":{\"stringValue\":\"%s\"},"
+      "\"command\":{\"stringValue\":\"%s\"},"
+      "\"status\":{\"stringValue\":\"pending\"},"
+      "\"requestedAt\":{\"integerValue\":\"%lld\"},"
+      "\"completedAt\":{\"nullValue\":null},"
+      "\"errorMessage\":{\"nullValue\":null},"
+      "\"source\":{\"stringValue\":\"automatic\"},"
+      "\"triggerReadingAt\":{\"integerValue\":\"%lld\"}}},"
+      "\"currentDocument\":{\"exists\":false}},"
+      "{\"update\":{\"name\":\"projects/%s/databases/(default)/documents/users/%s/gates/%s\","
+      "\"fields\":{\"reportedState\":{\"stringValue\":\"moving\"},"
+      "\"pendingCommandId\":{\"stringValue\":\"%s\"},"
+      "\"activeCommandSource\":{\"stringValue\":\"automatic\"},"
+      "\"updatedAt\":{\"integerValue\":\"%lld\"}}},"
+      "\"updateMask\":{\"fieldPaths\":[\"reportedState\",\"pendingCommandId\",\"activeCommandSource\",\"updatedAt\"]},"
+      "\"currentDocument\":{\"updateTime\":\"%s\"}}]}",
+      DILIG_FIREBASE_PROJECT_ID,
+      binding.userId,
+      binding.gateId,
+      commandId,
+      binding.gateId,
+      g_deviceId,
+      action == CommandAction::Open ? "OPEN" : "CLOSE",
+      static_cast<long long>(now),
+      static_cast<long long>(gate.automationRecordedAt),
+      DILIG_FIREBASE_PROJECT_ID,
+      binding.userId,
+      binding.gateId,
+      commandId,
+      static_cast<long long>(now),
+      gate.updateTime);
+  return length > 0 && static_cast<size_t>(length) < sizeof(payload) &&
+         sendJson("POST", url, payload, static_cast<size_t>(length), httpCode);
 }
 
 bool fetchCommand(
@@ -615,8 +737,9 @@ bool commitMotorResult(
       "{\"update\":{\"name\":\"projects/%s/databases/(default)/documents/users/%s/gates/%s\","
       "\"fields\":{\"reportedState\":{\"stringValue\":\"%s\"},"
       "\"pendingCommandId\":{\"nullValue\":null},"
+      "\"activeCommandSource\":{\"nullValue\":null},"
       "\"updatedAt\":{\"integerValue\":\"%lld\"}}},"
-      "\"updateMask\":{\"fieldPaths\":[\"reportedState\",\"pendingCommandId\",\"updatedAt\"]}}]}",
+      "\"updateMask\":{\"fieldPaths\":[\"reportedState\",\"pendingCommandId\",\"activeCommandSource\",\"updatedAt\"]}}]}",
       DILIG_FIREBASE_PROJECT_ID,
       binding.userId,
       binding.gateId,
@@ -975,6 +1098,9 @@ void cloudTask(void*) {
   MotorResult pendingResult{};
   bool hasPendingResult = false;
   bool commandInFlight = false;
+  int64_t lastAutomationReadingAt = 0;
+  uint8_t lowReadingStreak = 0;
+  uint8_t recoveredReadingStreak = 0;
   uint32_t lastWifiAttemptMs = 0;
   uint32_t lastBindingAttemptMs = 0;
   uint32_t lastHeartbeatMs = 0;
@@ -1087,8 +1213,13 @@ void cloudTask(void*) {
       if (fetchGate(binding, gate, httpCode)) {
         strlcpy(ui.gateName, gate.name, sizeof(ui.gateName));
         ui.assigned = true;
+        ui.automationLabel[0] = '\0';
 
         if (!commandInFlight && strlen(gate.pendingCommandId) > 0) {
+          strlcpy(
+              ui.automationLabel,
+              gate.activeCommandAutomatic ? "AUTO MOVING" : "MANUAL",
+              sizeof(ui.automationLabel));
           CommandSnapshot command{};
           bool commandConfigReady = true;
 #if DILIG_ACTUATOR_MODE == 1 || DILIG_ACTUATOR_MODE == 2
@@ -1165,15 +1296,106 @@ void cloudTask(void*) {
               commandInFlight = true;
             }
           }
-        } else if (!commandInFlight && strlen(gate.pendingCommandId) == 0 &&
-                   physicalState != PhysicalState::Unknown &&
-                   physicalState != PhysicalState::Moving &&
-                   physicalState != lastReportedPosition) {
-          esp_task_wdt_reset();
-          if (reportPosition(binding, physicalState, httpCode)) {
-            lastReportedPosition = physicalState;
+        } else if (!commandInFlight && strlen(gate.pendingCommandId) == 0) {
+          bool automaticReserved = false;
+          const int64_t currentEpochMs = epochMs();
+          const bool automationReadingFresh =
+              gate.automationEnabled &&
+              gate.automationTemperatureAvailable &&
+              gate.automationMoisturePercent >= 0.0F &&
+              gate.automationMoisturePercent <= 100.0F &&
+              gate.automationRecordedAt > 0 &&
+              currentEpochMs >= gate.automationRecordedAt &&
+              currentEpochMs - gate.automationRecordedAt <= 90000;
+
+          if (!gate.automationEnabled) {
+            strlcpy(ui.automationLabel, "MANUAL", sizeof(ui.automationLabel));
+            lowReadingStreak = 0;
+            recoveredReadingStreak = 0;
+            lastAutomationReadingAt = 0;
+          } else if (!automationReadingFresh) {
+            strlcpy(ui.automationLabel, "AUTO PAUSED", sizeof(ui.automationLabel));
+            lowReadingStreak = 0;
+            recoveredReadingStreak = 0;
+          } else {
+            strlcpy(ui.automationLabel, "AUTO READY", sizeof(ui.automationLabel));
+            if (gate.automationRecordedAt != lastAutomationReadingAt) {
+              const bool low =
+                  gate.automationTemperatureC < gate.temperatureThresholdC ||
+                  gate.automationMoisturePercent < gate.moistureThresholdPercent;
+              const bool recovered =
+                  gate.automationTemperatureC >=
+                      gate.temperatureThresholdC + gate.temperatureHysteresisC &&
+                  gate.automationMoisturePercent >=
+                      gate.moistureThresholdPercent + gate.moistureHysteresisPercent;
+              lastAutomationReadingAt = gate.automationRecordedAt;
+              if (low) {
+                lowReadingStreak = lowReadingStreak < 2 ? lowReadingStreak + 1 : 2;
+                recoveredReadingStreak = 0;
+              } else if (recovered) {
+                recoveredReadingStreak =
+                    recoveredReadingStreak < 2 ? recoveredReadingStreak + 1 : 2;
+                lowReadingStreak = 0;
+              } else {
+                lowReadingStreak = 0;
+                recoveredReadingStreak = 0;
+              }
+              Serial.printf(
+                  "[auto] reading: temp=%.2f C, moisture=%.1f%%, low=%u, recovered=%u\n",
+                  static_cast<double>(gate.automationTemperatureC),
+                  static_cast<double>(gate.automationMoisturePercent),
+                  lowReadingStreak,
+                  recoveredReadingStreak);
+            }
+
+            CommandAction automaticAction = CommandAction::Close;
+            bool shouldMove = false;
+            if (lowReadingStreak >= 2 && gate.reportedState != PhysicalState::Closed) {
+              automaticAction = CommandAction::Close;
+              shouldMove = true;
+            } else if (recoveredReadingStreak >= 2 && gate.reportedState != PhysicalState::Open) {
+              automaticAction = CommandAction::Open;
+              shouldMove = true;
+            }
+
+            if (shouldMove) {
+              char automaticCommandId[FIRESTORE_ID_CAPACITY] = {};
+              esp_task_wdt_reset();
+              if (createAutomaticCommand(
+                      binding,
+                      gate,
+                      automaticAction,
+                      automaticCommandId,
+                      sizeof(automaticCommandId),
+                      httpCode)) {
+                automaticReserved = true;
+                lowReadingStreak = 0;
+                recoveredReadingStreak = 0;
+                strlcpy(
+                    ui.automationLabel,
+                    automaticAction == CommandAction::Open ? "AUTO OPEN" : "AUTO CLOSE",
+                    sizeof(ui.automationLabel));
+                Serial.printf(
+                    "[auto] %s command created: %s\n",
+                    automaticAction == CommandAction::Open ? "OPEN" : "CLOSE",
+                    automaticCommandId);
+              } else {
+                Serial.printf("[auto] command reservation failed: HTTP %d\n", httpCode);
+              }
+              esp_task_wdt_reset();
+            }
           }
-          esp_task_wdt_reset();
+
+          if (!automaticReserved &&
+              physicalState != PhysicalState::Unknown &&
+              physicalState != PhysicalState::Moving &&
+              physicalState != lastReportedPosition) {
+            esp_task_wdt_reset();
+            if (reportPosition(binding, physicalState, httpCode)) {
+              lastReportedPosition = physicalState;
+            }
+            esp_task_wdt_reset();
+          }
         }
       } else if (httpCode == HTTP_CODE_FORBIDDEN || httpCode == HTTP_CODE_NOT_FOUND) {
         binding.assigned = false;

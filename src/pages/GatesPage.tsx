@@ -4,12 +4,14 @@ import { Button } from '../components/common/Button';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { EmptyState } from '../components/common/EmptyState';
 import { Plus, Sliders, Search } from 'lucide-react';
-import type { Gate, Device, CommandAction } from '../types';
+import type { Gate, Device, CommandAction, GateControlMode } from '../types';
 
 export interface GatesPageProps {
   gates: Gate[];
   devices: Device[];
   onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
+  onSetControlMode: (gate: Gate, mode: GateControlMode) => Promise<void>;
+  onConfigureAutomation: (gate: Gate) => void;
   onAddGate: () => void;
   onEditGate: (gate: Gate) => void;
   onDeleteGate: (gate: Gate) => Promise<void>;
@@ -19,6 +21,8 @@ export const GatesPage: React.FC<GatesPageProps> = ({
   gates,
   devices,
   onSendCommand,
+  onSetControlMode,
+  onConfigureAutomation,
   onAddGate,
   onEditGate,
   onDeleteGate,
@@ -142,6 +146,8 @@ export const GatesPage: React.FC<GatesPageProps> = ({
               actuatorDevice={getActuator(gate.actuatorDeviceId)}
               sensorDevice={getSensor(gate.sensorDeviceId)}
               onSendCommand={onSendCommand}
+              onSetControlMode={onSetControlMode}
+              onConfigureAutomation={onConfigureAutomation}
               onEdit={onEditGate}
               onDelete={(g) => setGateToDelete(g)}
             />

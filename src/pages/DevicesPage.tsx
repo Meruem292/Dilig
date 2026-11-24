@@ -3,7 +3,7 @@ import { DeviceCard } from '../components/devices/DeviceCard';
 import { Button } from '../components/common/Button';
 import { EmptyState } from '../components/common/EmptyState';
 import { Plus, Cpu, Sprout, Sliders, Search, Info } from 'lucide-react';
-import type { CommandAction, Device, Gate } from '../types';
+import type { Device, Gate } from '../types';
 
 export interface DevicesPageProps {
   devices: Device[];
@@ -11,7 +11,6 @@ export interface DevicesPageProps {
   onAddDevice: () => void;
   onUpdateDeviceName: (device: Device, newName: string) => Promise<void>;
   onDeleteDevice: (device: Device) => Promise<void>;
-  onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
   onUpdateTiming: (device: Device, openDurationMs: number, closeDurationMs: number) => Promise<void>;
   onUpdateServoAngles: (device: Device, openAngle: number, closeAngle: number) => Promise<void>;
 }
@@ -22,7 +21,6 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({
   onAddDevice,
   onUpdateDeviceName,
   onDeleteDevice,
-  onSendCommand,
   onUpdateTiming,
   onUpdateServoAngles,
 }) => {
@@ -152,7 +150,6 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({
               assignedGate={getAssignedGate(device.deviceId)}
               onUpdateName={onUpdateDeviceName}
               onDelete={onDeleteDevice}
-              onSendCommand={onSendCommand}
               onUpdateTiming={onUpdateTiming}
               onUpdateServoAngles={onUpdateServoAngles}
             />

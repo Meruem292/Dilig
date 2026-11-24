@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { Card } from '../common/Card';
-import { Button } from '../common/Button';
 import { Badge } from '../common/Badge';
 import { DeviceTypeBadge } from './DeviceTypeBadge';
 import { GateStatusBadge } from '../gates/GateStatusBadge';
@@ -16,13 +15,11 @@ import {
   Thermometer,
   Droplet,
   Check,
-  ArrowUpRight,
-  ArrowDownLeft,
   AlertTriangle,
   TimerReset,
   RotateCw,
 } from 'lucide-react';
-import type { CommandAction, Device, Gate } from '../../types';
+import type { Device, Gate } from '../../types';
 import { isDeviceOnline } from '../../services/deviceService';
 import { formatTimeAgo, isReadingStale } from '../../services/telemetryService';
 
@@ -31,7 +28,6 @@ export interface DeviceCardProps {
   assignedGate?: Gate | null;
   onUpdateName: (device: Device, newName: string) => Promise<void>;
   onDelete: (device: Device) => Promise<void>;
-  onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
   onUpdateTiming: (device: Device, openDurationMs: number, closeDurationMs: number) => Promise<void>;
   onUpdateServoAngles: (device: Device, openAngle: number, closeAngle: number) => Promise<void>;
 }
@@ -41,7 +37,6 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
   assignedGate,
   onUpdateName,
   onDelete,
-  onSendCommand,
   onUpdateTiming,
   onUpdateServoAngles,
 }) => {
@@ -50,8 +45,6 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isSavingName, setIsSavingName] = useState(false);
-  const [confirmAction, setConfirmAction] = useState<CommandAction | null>(null);
-  const [isSendingCommand, setIsSendingCommand] = useState(false);
   const [showTimingModal, setShowTimingModal] = useState(false);
   const [showAngleModal, setShowAngleModal] = useState(false);
 
@@ -59,8 +52,6 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
   const reading = device.type === 'sensor' ? device.latestReading : null;
   const readingStale = reading ? isReadingStale(reading.recordedAt) : true;
   const isMoving = assignedGate?.reportedState === 'moving';
-  const isOpen = assignedGate?.reportedState === 'open';
-  const isClosed = assignedGate?.reportedState === 'closed';
   const isMainGate = device.type === 'actuator' && device.deviceId.startsWith('DILIG-MAIN-');
   const isSubGate = device.type === 'actuator' && device.deviceId.startsWith('DILIG-SUB-');
 
@@ -86,17 +77,6 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
       setShowDeleteConfirm(false);
     } finally {
       setIsDeleting(false);
-    }
-  };
-
-  const handleCommandConfirm = async () => {
-    if (!assignedGate || !confirmAction) return;
-    setIsSendingCommand(true);
-    try {
-      await onSendCommand(assignedGate, confirmAction);
-      setConfirmAction(null);
-    } finally {
-      setIsSendingCommand(false);
     }
   };
 
@@ -255,54 +235,14 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
           {!assignedGate ? (
             <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
-              <span>Assign this actuator to a gate before sending commands.</span>
+              <span>This actuator is unassigned. Link it from the Gates page.</span>
             </div>
           ) : !online ? (
-            <div className="p-2.5 rounded-xl bg-slate-100 border border-slate-200 text-slate-700 text-xs flex items-center gap-2 mb-2.5">
+            <div className="p-2.5 rounded-xl bg-slate-100 border border-slate-200 text-slate-700 text-xs flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-slate-500 flex-shrink-0" />
-              <span>The actuator is offline. Controls are disabled.</span>
+              <span>The actuator is offline. Hardware settings remain available.</span>
             </div>
           ) : null}
-
-          {assignedGate && (
-            <div className="mt-2.5">
-              <div className="flex items-center justify-between gap-3 mb-2.5">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-wide text-charcoal">
-                    Manual Gate Control
-                  </p>
-                  <p className="text-[11px] text-charcoal-muted mt-0.5">
-                    Controls {assignedGate.name}
-                  </p>
-                </div>
-                <GateStatusBadge state={assignedGate.reportedState} size="sm" />
-              </div>
-              <div className="grid grid-cols-2 gap-2.5">
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="md"
-                  leftIcon={<ArrowUpRight className="w-4 h-4" />}
-                  onClick={() => setConfirmAction('OPEN')}
-                  disabled={!online || isMoving || isOpen}
-                  className="w-full"
-                >
-                  {isOpen ? 'Gate Open' : 'Manual Open'}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="md"
-                  leftIcon={<ArrowDownLeft className="w-4 h-4" />}
-                  onClick={() => setConfirmAction('CLOSE')}
-                  disabled={!online || isMoving || isClosed}
-                  className="w-full"
-                >
-                  {isClosed ? 'Gate Closed' : 'Manual Close'}
-                </Button>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -364,17 +304,6 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
         isLoading={isDeleting}
       />
 
-      <ConfirmDialog
-        isOpen={confirmAction !== null}
-        onClose={() => setConfirmAction(null)}
-        onConfirm={handleCommandConfirm}
-        title={confirmAction === 'OPEN' ? 'Open Irrigation Gate?' : 'Close Irrigation Gate?'}
-        message={`Are you sure you want to ${confirmAction || ''} "${assignedGate?.name || 'this gate'}"? The assigned controller will run its configured movement cycle and stop automatically.`}
-        confirmLabel={confirmAction === 'OPEN' ? 'Yes, Open Gate' : 'Yes, Close Gate'}
-        variant={confirmAction === 'OPEN' ? 'primary' : 'secondary'}
-        isLoading={isSendingCommand}
-      />
-
       {isMainGate && showTimingModal && (
         <MainGateTimingModal
           isOpen
@@ -392,6 +321,7 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({
           onSave={onUpdateServoAngles}
         />
       )}
+
     </Card>
   );
 };

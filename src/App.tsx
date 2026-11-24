@@ -7,13 +7,24 @@ import { AuthPage } from './pages/AuthPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { GatesPage } from './pages/GatesPage';
 import { DevicesPage } from './pages/DevicesPage';
+import { QuadrantsPage } from './pages/QuadrantsPage';
 import { GateFormModal } from './components/gates/GateFormModal';
 import { DeviceFormModal } from './components/devices/DeviceFormModal';
 import { ProfileModal } from './components/settings/ProfileModal';
 import { SoilThresholdModal } from './components/settings/SoilThresholdModal';
 import { LoadingSpinner } from './components/common/LoadingSpinner';
+import { GateAutomationSetupModal } from './components/gates/GateAutomationSetupModal';
 
-import type { Gate, Device, CommandAction, DeviceType } from './types';
+import type {
+  Gate,
+  Device,
+  CommandAction,
+  DeviceType,
+  GateControlMode,
+  Quadrant,
+  QuadrantColor,
+  QuadrantPlacement,
+} from './types';
 import {
   subscribeToUserDevices,
   addDevice,
@@ -22,9 +33,18 @@ import {
   ensureDeviceRegistry,
   updateMainGateTiming,
   updateSubGateAngles,
+  updateSensorAutomation,
 } from './services/deviceService';
-import { subscribeToUserGates, createGate, updateGate, deleteGate } from './services/gateService';
+import { subscribeToUserGates, createGate, updateGate, deleteGate, setGateControlMode } from './services/gateService';
 import { sendGateCommand } from './services/commandService';
+import {
+  subscribeToUserQuadrants,
+  createQuadrant,
+  updateQuadrant,
+  deleteQuadrant,
+  updateGatePlacement,
+  updateSensorPlacement,
+} from './services/quadrantService';
 
 const MainApp: React.FC = () => {
   const { currentUser, userProfile, loading: authLoading } = useAuth();
@@ -33,6 +53,7 @@ const MainApp: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<NavTab>('home');
   const [gates, setGates] = useState<Gate[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [quadrants, setQuadrants] = useState<Quadrant[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
 
   const registryRepairs = useRef(new Set<string>());
@@ -43,12 +64,14 @@ const MainApp: React.FC = () => {
   const [isAddDeviceOpen, setIsAddDeviceOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isThresholdsOpen, setIsThresholdsOpen] = useState(false);
+  const [automationGateToConfigure, setAutomationGateToConfigure] = useState<Gate | null>(null);
 
   // Real-time Firestore subscriptions for authenticated user
   useEffect(() => {
     if (!currentUser) {
       setGates([]);
       setDevices([]);
+      setQuadrants([]);
       setDataLoading(false);
       return;
     }
@@ -79,9 +102,16 @@ const MainApp: React.FC = () => {
       }
     );
 
+    const unsubQuadrants = subscribeToUserQuadrants(
+      currentUser.uid,
+      setQuadrants,
+      (err) => showError('Field map sync error', err.message)
+    );
+
     return () => {
       unsubDevices();
       unsubGates();
+      unsubQuadrants();
     };
   }, [currentUser]);
 
@@ -152,6 +182,7 @@ const MainApp: React.FC = () => {
       await updateGate(currentUser.uid, gateToEdit.id, {
         ...data,
         oldActuatorDeviceId: gateToEdit.actuatorDeviceId,
+        oldSensorDeviceId: gateToEdit.sensorDeviceId,
       });
       showSuccess('Gate updated', `"${data.name}" has been updated.`);
       setGateToEdit(null);
@@ -164,7 +195,7 @@ const MainApp: React.FC = () => {
   const handleDeleteGate = async (gate: Gate) => {
     if (!currentUser) return;
     try {
-      await deleteGate(currentUser.uid, gate.id, gate.actuatorDeviceId);
+      await deleteGate(currentUser.uid, gate.id, gate.actuatorDeviceId, gate.sensorDeviceId);
       showSuccess('Gate deleted', `"${gate.name}" has been removed.`);
     } catch (err: unknown) {
       showError('Delete failed', (err as Error).message || 'Could not delete gate.');
@@ -198,7 +229,7 @@ const MainApp: React.FC = () => {
   const handleDeleteDevice = async (device: Device) => {
     if (!currentUser) return;
     try {
-      await deleteDevice(currentUser.uid, device);
+      await deleteDevice(currentUser.uid, device, gates);
       showSuccess('Device removed', `"${device.name}" removed from your account.`);
     } catch (err: unknown) {
       showError('Remove failed', (err as Error).message || 'Could not remove device.');
@@ -241,6 +272,124 @@ const MainApp: React.FC = () => {
     }
   };
 
+  const handleUpdateSensorAutomation = async (
+    sensor: Device,
+    temperatureThresholdC: number,
+    moistureThresholdPercent: number,
+    selectedGateIds: string[]
+  ) => {
+    if (!currentUser) return;
+    try {
+      await updateSensorAutomation(
+        currentUser.uid,
+        sensor,
+        gates,
+        temperatureThresholdC,
+        moistureThresholdPercent,
+        selectedGateIds
+      );
+      showSuccess(
+        'Automatic gates updated',
+        `${selectedGateIds.length} gate${selectedGateIds.length === 1 ? '' : 's'} will respond to ${sensor.name}.`
+      );
+    } catch (err: unknown) {
+      showError('Automation update failed', (err as Error).message || 'Could not update automatic gates.');
+      throw err;
+    }
+  };
+
+  const handleSetControlMode = async (gate: Gate, mode: GateControlMode) => {
+    if (!currentUser) return;
+    const sensor = devices.find((device) => device.deviceId === gate.sensorDeviceId && device.type === 'sensor') || null;
+    if (mode === 'automatic' && sensor && !sensor.automationConfig) {
+      setAutomationGateToConfigure(gate);
+      return;
+    }
+    try {
+      await setGateControlMode(currentUser.uid, gate, sensor, mode);
+      showSuccess(
+        `${mode === 'automatic' ? 'Automatic' : 'Manual'} mode enabled`,
+        `${gate.name} is now controlled in ${mode} mode.`
+      );
+    } catch (err: unknown) {
+      const message = (err as Error).message || 'Could not change the gate control mode.';
+      if (message === 'AUTOMATION_SETUP_REQUIRED') {
+        setAutomationGateToConfigure(gate);
+        return;
+      }
+      showError('Mode change failed', message);
+      throw err;
+    }
+  };
+
+  const handleConfigureGateAutomation = async (
+    temperatureThresholdC: number,
+    moistureThresholdPercent: number
+  ) => {
+    if (!currentUser || !automationGateToConfigure) return;
+    const gate = automationGateToConfigure;
+    const sensor = devices.find((device) => device.deviceId === gate.sensorDeviceId && device.type === 'sensor');
+    if (!sensor) throw new Error('The linked sensor could not be found.');
+    const selectedGateIds = [
+      ...new Set([
+        ...(sensor.automationConfig?.gateIds || []),
+        ...gates.filter((item) => item.sensorDeviceId === sensor.deviceId && item.controlMode === 'automatic').map((item) => item.id),
+        gate.id,
+      ]),
+    ];
+    await handleUpdateSensorAutomation(
+      sensor,
+      temperatureThresholdC,
+      moistureThresholdPercent,
+      selectedGateIds
+    );
+  };
+
+  const handleCreateQuadrant = async (input: { name: string; description?: string; color: QuadrantColor }) => {
+    if (!currentUser) throw new Error('User is not authenticated.');
+    try {
+      const id = await createQuadrant(currentUser.uid, input);
+      showSuccess('Quadrant added', `"${input.name}" is ready for gate and sensor placement.`);
+      return id;
+    } catch (err: unknown) {
+      showError('Could not add quadrant', (err as Error).message || 'Try again.');
+      throw err;
+    }
+  };
+
+  const handleUpdateQuadrant = async (
+    quadrant: Quadrant,
+    input: { name: string; description?: string; color: QuadrantColor }
+  ) => {
+    if (!currentUser) return;
+    await updateQuadrant(currentUser.uid, quadrant.id, input);
+    showSuccess('Quadrant updated', `"${input.name}" has been saved.`);
+  };
+
+  const handleDeleteQuadrant = async (quadrant: Quadrant) => {
+    if (!currentUser) return;
+    await deleteQuadrant(currentUser.uid, quadrant.id, gates, devices);
+    showSuccess('Quadrant deleted', 'Its gates and sensors are now unplaced.');
+  };
+
+  const handleMoveGate = async (gate: Gate, placement: QuadrantPlacement | null) => {
+    if (!currentUser) return;
+    try {
+      await updateGatePlacement(currentUser.uid, gate.id, placement);
+    } catch (err: unknown) {
+      showError('Gate placement failed', (err as Error).message || 'Could not save the gate position.');
+    }
+  };
+
+  const handleMoveSensor = async (sensor: Device, placement: QuadrantPlacement | null) => {
+    if (!currentUser) return;
+    try {
+      await updateSensorPlacement(currentUser.uid, sensor.id, placement);
+    } catch (err: unknown) {
+      showError('Sensor placement failed', (err as Error).message || 'Could not save the sensor position.');
+    }
+  };
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -275,15 +424,25 @@ const MainApp: React.FC = () => {
               latestReading={latestReading}
               sensorDevice={primarySensorDevice}
               thresholds={userProfile?.thresholds}
-              onSendCommand={handleSendCommand}
               onNavigateToGates={() => setCurrentTab('gates')}
+              onNavigateToQuadrants={() => setCurrentTab('quadrants')}
               onNavigateToDevices={() => setCurrentTab('devices')}
-              onAddGate={() => {
-                setGateToEdit(null);
-                setIsAddGateOpen(true);
-              }}
-              onAddDevice={() => setIsAddDeviceOpen(true)}
               onConfigureThresholds={() => setIsThresholdsOpen(true)}
+            />
+          )}
+
+          {currentTab === 'quadrants' && (
+            <QuadrantsPage
+              quadrants={quadrants}
+              gates={gates}
+              devices={devices}
+              onCreateQuadrant={handleCreateQuadrant}
+              onUpdateQuadrant={handleUpdateQuadrant}
+              onDeleteQuadrant={handleDeleteQuadrant}
+              onMoveGate={handleMoveGate}
+              onMoveSensor={handleMoveSensor}
+              onSetControlMode={handleSetControlMode}
+              onNavigateToGates={() => setCurrentTab('gates')}
             />
           )}
 
@@ -292,6 +451,8 @@ const MainApp: React.FC = () => {
               gates={gates}
               devices={devices}
               onSendCommand={handleSendCommand}
+              onSetControlMode={handleSetControlMode}
+              onConfigureAutomation={setAutomationGateToConfigure}
               onAddGate={() => {
                 setGateToEdit(null);
                 setIsAddGateOpen(true);
@@ -311,7 +472,6 @@ const MainApp: React.FC = () => {
               onAddDevice={() => setIsAddDeviceOpen(true)}
               onUpdateDeviceName={handleUpdateDeviceName}
               onDeleteDevice={handleDeleteDevice}
-              onSendCommand={handleSendCommand}
               onUpdateTiming={handleUpdateMainGateTiming}
               onUpdateServoAngles={handleUpdateSubGateAngles}
             />
@@ -347,6 +507,23 @@ const MainApp: React.FC = () => {
         isOpen={isThresholdsOpen}
         onClose={() => setIsThresholdsOpen(false)}
       />
+
+      {automationGateToConfigure && (() => {
+        const sensor = devices.find((device) =>
+          device.type === 'sensor' && device.deviceId === automationGateToConfigure.sensorDeviceId
+        );
+        return sensor ? (
+          <GateAutomationSetupModal
+            key={`${automationGateToConfigure.id}-${sensor.id}`}
+            isOpen
+            gate={automationGateToConfigure}
+            sensor={sensor}
+            defaultMoistureThreshold={userProfile?.thresholds?.dryMoistureMax ?? 30}
+            onClose={() => setAutomationGateToConfigure(null)}
+            onSave={handleConfigureGateAutomation}
+          />
+        ) : null;
+      })()}
     </Layout>
   );
 };

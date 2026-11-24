@@ -8,6 +8,30 @@ export type CommandAction = 'OPEN' | 'CLOSE';
 
 export type CommandStatus = 'pending' | 'executing' | 'succeeded' | 'failed' | 'expired';
 
+export type CommandSource = 'manual' | 'automatic';
+
+export type GateControlMode = 'manual' | 'automatic';
+
+export type QuadrantEdge = 'north' | 'east' | 'south' | 'west';
+
+export type QuadrantColor = 'green' | 'blue' | 'amber';
+
+export interface QuadrantPlacement {
+  quadrantId: string;
+  x: number;
+  y: number;
+  edge?: QuadrantEdge;
+}
+
+export interface Quadrant {
+  id: string;
+  name: string;
+  description?: string;
+  color: QuadrantColor;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface SoilThresholds {
   dryMoistureMax: number;   // Below this is "Dry" (e.g. 30%)
   wetMoistureMin: number;   // Above this is "Wet" (e.g. 70%)
@@ -29,6 +53,23 @@ export interface SoilReading {
   recordedAt: number; // epoch ms for consistent serialization
 }
 
+export interface SensorAutomationConfig {
+  temperatureThresholdC: number;
+  moistureThresholdPercent: number;
+  gateIds: string[];
+  updatedAt: number;
+}
+
+export interface GateAutomationConfig {
+  enabled: boolean;
+  sensorDeviceId: string;
+  temperatureThresholdC: number;
+  moistureThresholdPercent: number;
+  temperatureHysteresisC: number;
+  moistureHysteresisPercent: number;
+  updatedAt: number;
+}
+
 export interface Device {
   id: string; // Firestore document ID
   deviceId: string; // Hardware ID string, e.g. ESP32-SN01
@@ -47,6 +88,8 @@ export interface Device {
   servoOpenAngle?: number;
   servoCloseAngle?: number;
   servoConfigUpdatedAt?: number | null;
+  automationConfig?: SensorAutomationConfig | null;
+  quadrantPlacement?: QuadrantPlacement | null;
 }
 
 export interface Gate {
@@ -58,6 +101,11 @@ export interface Gate {
   sensorDeviceId?: string | null;
   reportedState: GateReportedState;
   pendingCommandId?: string | null;
+  activeCommandSource?: CommandSource | null;
+  controlMode: GateControlMode;
+  automationConfig?: GateAutomationConfig | null;
+  automationReading?: SoilReading | null;
+  quadrantPlacement?: QuadrantPlacement | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -71,4 +119,6 @@ export interface GateCommand {
   requestedAt: number;
   completedAt?: number | null;
   errorMessage?: string | null;
+  source?: CommandSource;
+  triggerReadingAt?: number | null;
 }

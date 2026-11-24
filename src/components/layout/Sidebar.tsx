@@ -1,5 +1,5 @@
 import React from 'react';
-import { Home, Sliders, Cpu } from 'lucide-react';
+import { Home, Sliders, Cpu, Map } from 'lucide-react';
 import type { NavTab } from './BottomNav';
 
 export interface SidebarProps {
@@ -20,6 +20,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'home' as NavTab,
       label: 'Home Dashboard',
       icon: Home,
+    },
+    {
+      id: 'quadrants' as NavTab,
+      label: 'Field Quadrants',
+      icon: Map,
     },
     {
       id: 'gates' as NavTab,

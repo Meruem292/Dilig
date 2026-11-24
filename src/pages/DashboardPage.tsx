@@ -1,10 +1,10 @@
 import React, { useMemo } from 'react';
 import { SoilConditionCard } from '../components/dashboard/SoilConditionCard';
 import { DeviceSummaryCard } from '../components/dashboard/DeviceSummaryCard';
-import { QuickGateList } from '../components/dashboard/QuickGateList';
 import { Button } from '../components/common/Button';
-import { Plus, Cpu } from 'lucide-react';
-import type { Gate, Device, SoilReading, CommandAction, SoilThresholds } from '../types';
+import { Card } from '../components/common/Card';
+import { ArrowRight, Map, Sliders } from 'lucide-react';
+import type { Gate, Device, SoilReading, SoilThresholds } from '../types';
 import { isDeviceOnline } from '../services/deviceService';
 
 export interface DashboardPageProps {
@@ -13,11 +13,9 @@ export interface DashboardPageProps {
   latestReading: SoilReading | null;
   sensorDevice: Device | null;
   thresholds?: SoilThresholds;
-  onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
   onNavigateToGates: () => void;
+  onNavigateToQuadrants: () => void;
   onNavigateToDevices: () => void;
-  onAddGate: () => void;
-  onAddDevice: () => void;
   onConfigureThresholds: () => void;
 }
 
@@ -27,14 +25,12 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   latestReading,
   sensorDevice,
   thresholds,
-  onSendCommand,
   onNavigateToGates,
+  onNavigateToQuadrants,
   onNavigateToDevices,
-  onAddGate,
-  onAddDevice,
   onConfigureThresholds,
 }) => {
-  const { onlineCount, offlineCount } = useMemo(() => {
+  const { onlineCount, offlineCount, openCount, closedCount, movingCount } = useMemo(() => {
     let online = 0;
     let offline = 0;
     for (const d of devices) {
@@ -44,8 +40,14 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         offline++;
       }
     }
-    return { onlineCount: online, offlineCount: offline };
-  }, [devices]);
+    return {
+      onlineCount: online,
+      offlineCount: offline,
+      openCount: gates.filter((gate) => gate.reportedState === 'open').length,
+      closedCount: gates.filter((gate) => gate.reportedState === 'closed').length,
+      movingCount: gates.filter((gate) => gate.reportedState === 'moving').length,
+    };
+  }, [devices, gates]);
 
   return (
     <div className="space-y-6 animate-in fade-in-0 duration-150">
@@ -60,27 +62,6 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            leftIcon={<Cpu className="w-3.5 h-3.5" />}
-            onClick={onAddDevice}
-          >
-            Add Device
-          </Button>
-
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            leftIcon={<Plus className="w-3.5 h-3.5" />}
-            onClick={onAddGate}
-          >
-            Add Gate
-          </Button>
-        </div>
       </div>
 
       {/* 1. What is the current soil condition? */}
@@ -104,15 +85,32 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         />
       </section>
 
-      {/* 3. Can I control my irrigation gates? */}
+      {/* 3. Where are my gates and what state are they in? */}
       <section aria-labelledby="gates-control-heading">
-        <QuickGateList
-          gates={gates}
-          devices={devices}
-          onSendCommand={onSendCommand}
-          onViewAllGates={onNavigateToGates}
-          onAddGate={onAddGate}
-        />
+        <Card className="border-slate-200">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 id="gates-control-heading" className="flex items-center gap-2 text-base font-bold text-charcoal sm:text-lg">
+                <Sliders className="h-5 w-5 text-water-600" />
+                Gate network at a glance
+              </h2>
+              <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm">
+                <span><strong className="tabular-nums text-nature-700">{openCount}</strong> open</span>
+                <span><strong className="tabular-nums text-slate-700">{closedCount}</strong> closed</span>
+                <span><strong className="tabular-nums text-water-700">{movingCount}</strong> moving</span>
+                <span><strong className="tabular-nums text-charcoal">{gates.length}</strong> total</span>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button type="button" variant="primary" size="sm" leftIcon={<Map className="h-4 w-4" />} onClick={onNavigateToQuadrants}>
+                Open Field Map
+              </Button>
+              <Button type="button" variant="outline" size="sm" rightIcon={<ArrowRight className="h-4 w-4" />} onClick={onNavigateToGates}>
+                Manage Gates
+              </Button>
+            </div>
+          </div>
+        </Card>
       </section>
     </div>
   );
