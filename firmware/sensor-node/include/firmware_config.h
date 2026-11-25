@@ -29,10 +29,12 @@ constexpr uint32_t CLOUD_RETRY_INTERVAL_MS = 10000;
 constexpr uint32_t HTTP_TIMEOUT_MS = 10000;
 constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 30;
 
-constexpr uint32_t SENSOR_TASK_STACK_WORDS = 4096;
-// TLS handshakes allocate deeply through mbedTLS. 6,144 words can overflow
-// on an ESP32 Arduino 3.x build during the first Firestore request.
-constexpr uint32_t CLOUD_TASK_STACK_WORDS = 12288;
+// ESP-IDF's xTaskCreatePinnedToCore stack-depth argument is measured in bytes,
+// unlike upstream FreeRTOS ports that commonly document it in StackType_t words.
+constexpr uint32_t SENSOR_TASK_STACK_BYTES = 4096;
+// Google certificate verification has deep mbedTLS/ECDSA call frames. Keep the
+// cloud task aligned with the proven main/sub-gate allocation.
+constexpr uint32_t CLOUD_TASK_STACK_BYTES = 24576;
 constexpr UBaseType_t SENSOR_TASK_PRIORITY = 2;
 constexpr UBaseType_t CLOUD_TASK_PRIORITY = 1;
 

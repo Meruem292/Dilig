@@ -582,7 +582,7 @@ void sensorTask(void*) {
     if (lastResourceReportMs == 0 || now - lastResourceReportMs >= 60000) {
       Serial.printf(
           "[health] sensor stack free: %lu bytes\n",
-          static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
+          static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
       lastResourceReportMs = now;
     }
 
@@ -702,7 +702,7 @@ void cloudTask(void*) {
     if (lastResourceReportMs == 0 || now - lastResourceReportMs >= 60000) {
       Serial.printf(
           "[health] cloud stack free: %lu bytes, heap: %u bytes\n",
-          static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)),
+          static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)),
           ESP.getFreeHeap());
       lastResourceReportMs = now;
     }
@@ -744,7 +744,7 @@ void setup() {
   const BaseType_t sensorCreated = xTaskCreatePinnedToCore(
       sensorTask,
       "sensor",
-      config::SENSOR_TASK_STACK_WORDS,
+      config::SENSOR_TASK_STACK_BYTES,
       nullptr,
       config::SENSOR_TASK_PRIORITY,
       nullptr,
@@ -752,7 +752,7 @@ void setup() {
   const BaseType_t cloudCreated = xTaskCreatePinnedToCore(
       cloudTask,
       "cloud",
-      config::CLOUD_TASK_STACK_WORDS,
+      config::CLOUD_TASK_STACK_BYTES,
       nullptr,
       config::CLOUD_TASK_PRIORITY,
       nullptr,
