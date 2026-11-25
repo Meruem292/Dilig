@@ -97,17 +97,23 @@ service cloud.firestore {
       return val is number && val >= -40 && val <= 85;
     }
 
+    function hasEnabledAutomationConfig(data) {
+      return data.keys().hasAny(['automationConfig']) &&
+        data.automationConfig is map &&
+        data.automationConfig.keys().hasAny(['enabled']) &&
+        data.automationConfig.enabled == true;
+    }
+
     function isAutomaticControl(data) {
-      return data.controlMode == 'automatic' ||
-        (!data.keys().hasAny(['controlMode']) &&
-          data.automationConfig is map &&
-          data.automationConfig.enabled == true);
+      let hasMode = data.keys().hasAny(['controlMode']);
+      return (hasMode && data.controlMode == 'automatic') ||
+        (!hasMode && hasEnabledAutomationConfig(data));
     }
 
     function isManualControl(data) {
-      return data.controlMode == 'manual' ||
-        (!data.keys().hasAny(['controlMode']) &&
-          !(data.automationConfig is map && data.automationConfig.enabled == true));
+      let hasMode = data.keys().hasAny(['controlMode']);
+      return (hasMode && data.controlMode == 'manual') ||
+        (!hasMode && !hasEnabledAutomationConfig(data));
     }
 
     function registryMatchesSensor(userId, deviceDocId, hardwareId) {
