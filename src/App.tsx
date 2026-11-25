@@ -441,6 +441,7 @@ const MainApp: React.FC = () => {
               onDeleteQuadrant={handleDeleteQuadrant}
               onMoveGate={handleMoveGate}
               onMoveSensor={handleMoveSensor}
+              onSendCommand={handleSendCommand}
               onSetControlMode={handleSetControlMode}
               onNavigateToGates={() => setCurrentTab('gates')}
             />

@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import {
+  ArrowDownLeft,
+  ArrowUpRight,
   Cpu,
   Droplet,
   Edit3,
@@ -24,6 +26,7 @@ import { formatTimeAgo, isAutomationReadingStale } from '../services/telemetrySe
 import type {
   Device,
   Gate,
+  CommandAction,
   GateControlMode,
   Quadrant,
   QuadrantColor,
@@ -39,6 +42,7 @@ interface QuadrantsPageProps {
   onDeleteQuadrant: (quadrant: Quadrant) => Promise<void>;
   onMoveGate: (gate: Gate, placement: QuadrantPlacement | null) => Promise<void>;
   onMoveSensor: (sensor: Device, placement: QuadrantPlacement | null) => Promise<void>;
+  onSendCommand: (gate: Gate, action: CommandAction) => Promise<void>;
   onSetControlMode: (gate: Gate, mode: GateControlMode) => Promise<void>;
   onNavigateToGates: () => void;
 }
@@ -74,6 +78,7 @@ export const QuadrantsPage: React.FC<QuadrantsPageProps> = ({
   onDeleteQuadrant,
   onMoveGate,
   onMoveSensor,
+  onSendCommand,
   onSetControlMode,
   onNavigateToGates,
 }) => {
@@ -85,6 +90,8 @@ export const QuadrantsPage: React.FC<QuadrantsPageProps> = ({
   const [addType, setAddType] = useState<AddItemType>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [modeBusy, setModeBusy] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<CommandAction | null>(null);
+  const [commandBusy, setCommandBusy] = useState(false);
 
   const effectiveQuadrantId = quadrants.some((item) => item.id === selectedQuadrantId)
     ? selectedQuadrantId
@@ -112,6 +119,8 @@ export const QuadrantsPage: React.FC<QuadrantsPageProps> = ({
   const selectedGateSensor = selectedGate
     ? sensors.find((sensor) => sensor.deviceId === selectedGate.sensorDeviceId) ?? null
     : null;
+  const selectedGateHasActuator = Boolean(selectedGate?.actuatorDeviceId && selectedGateActuator);
+  const selectedGateActuatorOnline = selectedGateActuator ? isDeviceOnline(selectedGateActuator) : false;
 
   const totals = {
     gates: quadrantGates.length,
@@ -162,6 +171,17 @@ export const QuadrantsPage: React.FC<QuadrantsPageProps> = ({
       await onSetControlMode(selectedGate, mode);
     } finally {
       setModeBusy(false);
+    }
+  };
+
+  const handleMapCommand = async () => {
+    if (!selectedGate || !confirmAction) return;
+    setCommandBusy(true);
+    try {
+      await onSendCommand(selectedGate, confirmAction);
+      setConfirmAction(null);
+    } finally {
+      setCommandBusy(false);
     }
   };
 
@@ -253,6 +273,45 @@ export const QuadrantsPage: React.FC<QuadrantsPageProps> = ({
                         <div className="flex justify-between rounded-lg bg-slate-50 p-2"><span className="text-slate-500">Actuator</span><span className="font-semibold text-charcoal">{selectedGateActuator?.name || 'Not linked'}</span></div>
                         <div className="flex justify-between rounded-lg bg-slate-50 p-2"><span className="text-slate-500">Sensor</span><span className="font-semibold text-charcoal">{selectedGateSensor?.name || 'Not linked'}</span></div>
                       </div>
+                      <div className="border-y border-slate-100 py-4">
+                        <div className="mb-2.5 flex items-center justify-between gap-2">
+                          <div>
+                            <p className="text-xs font-bold uppercase tracking-wide text-charcoal">Gate control</p>
+                            <p className="mt-0.5 text-[11px] text-charcoal-muted">
+                              {selectedGate.controlMode === 'automatic'
+                                ? 'Switch to Manual before direct control.'
+                                : selectedGateActuatorOnline
+                                  ? 'Send a confirmed command to this gate.'
+                                  : 'The actuator must be online.'}
+                            </p>
+                          </div>
+                          <span className={`h-2.5 w-2.5 flex-none rounded-full ${selectedGateActuatorOnline ? 'bg-nature-500' : 'bg-slate-300'}`} aria-label={selectedGateActuatorOnline ? 'Actuator online' : 'Actuator offline'} />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2.5">
+                          <Button
+                            type="button"
+                            variant="primary"
+                            size="md"
+                            leftIcon={<ArrowUpRight className="h-4 w-4" />}
+                            onClick={() => setConfirmAction('OPEN')}
+                            disabled={!selectedGateHasActuator || !selectedGateActuatorOnline || selectedGate.reportedState === 'moving' || selectedGate.reportedState === 'open' || selectedGate.controlMode === 'automatic'}
+                            className="w-full"
+                          >
+                            {selectedGate.reportedState === 'open' ? 'Open' : 'Open Gate'}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="md"
+                            leftIcon={<ArrowDownLeft className="h-4 w-4" />}
+                            onClick={() => setConfirmAction('CLOSE')}
+                            disabled={!selectedGateHasActuator || !selectedGateActuatorOnline || selectedGate.reportedState === 'moving' || selectedGate.reportedState === 'closed' || selectedGate.controlMode === 'automatic'}
+                            className="w-full"
+                          >
+                            {selectedGate.reportedState === 'closed' ? 'Closed' : 'Close Gate'}
+                          </Button>
+                        </div>
+                      </div>
                       <div>
                         <p className="mb-2 text-xs font-bold uppercase tracking-wide text-charcoal">Control mode</p>
                         <div className="grid grid-cols-2 rounded-xl bg-slate-100 p-1">
@@ -301,6 +360,17 @@ export const QuadrantsPage: React.FC<QuadrantsPageProps> = ({
             : handleCreate}
         />
       )}
+
+      <ConfirmDialog
+        isOpen={confirmAction !== null}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={() => void handleMapCommand()}
+        title={confirmAction === 'OPEN' ? 'Open Irrigation Gate?' : 'Close Irrigation Gate?'}
+        message={`Are you sure you want to ${confirmAction === 'OPEN' ? 'OPEN' : 'CLOSE'} "${selectedGate?.name ?? 'this gate'}"? This command will be transmitted to the physical actuator device.`}
+        confirmLabel={confirmAction === 'OPEN' ? 'Yes, Open Gate' : 'Yes, Close Gate'}
+        variant={confirmAction === 'OPEN' ? 'primary' : 'secondary'}
+        isLoading={commandBusy}
+      />
 
       <ConfirmDialog
         isOpen={deleteTarget !== null}
